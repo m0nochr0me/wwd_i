@@ -51,10 +51,13 @@ class _Subset:
 def _load_stream(dataset: str, config: str, split: str):
     import datasets
 
-    try:  # older script-based datasets need opt-in remote code; newer ones reject the kwarg
-        return datasets.load_dataset(dataset, config, split=split, streaming=True, trust_remote_code=True)
-    except TypeError:
-        return datasets.load_dataset(dataset, config, split=split, streaming=True)
+    # MSWC ships as a loading script; datasets >= 4 dropped script support entirely.
+    if int(datasets.__version__.split(".", 1)[0]) >= 4:
+        raise RuntimeError(
+            f"datasets {datasets.__version__} removed script-based datasets, which {dataset} still uses. "
+            "Install an older release:  uv pip install --python .venv/bin/python 'datasets<4'"
+        )
+    return datasets.load_dataset(dataset, config, split=split, streaming=True, trust_remote_code=True)
 
 
 def mswc_peek(*, dataset: str, config: str, split: str, n: int = 1) -> None:

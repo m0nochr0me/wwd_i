@@ -41,7 +41,7 @@ dev = [
     "ruff>=0.15.17",
 ]
 train = [
-    "datasets>=3.0.0",
+    "datasets>=2.20.0,<4.0.0",  # MSWC ships a loading script; datasets>=4 dropped script support
     "onnxscript>=0.7.0",
     "torch>=2.12.0",
     "torchaudio>=2.11.0",
