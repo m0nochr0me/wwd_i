@@ -130,6 +130,10 @@ def export_onnx(model: Backbone, path: str | Path, *, n_frames: int = 76) -> Pat
     The model is convs + batchnorm + pooling + linear, so the ONNX graph matches
     the eval-mode PyTorch module within float tolerance. ``n_frames`` only sizes
     the trace dummy; the exported graph accepts any time length.
+
+    Weights are written inline (``external_data=False``): the dynamo exporter
+    otherwise spills them to a ``{path}.data`` sidecar, which silently breaks the
+    model the moment the ``.onnx`` is moved or downloaded without it.
     """
     import copy
 
@@ -149,6 +153,7 @@ def export_onnx(model: Backbone, path: str | Path, *, n_frames: int = 76) -> Pat
         input_names=["mel"],
         output_names=["embedding"],
         dynamic_shapes={"mel": {1: Dim("frames")}},
+        external_data=False,
         verbose=False,
     )
     return path

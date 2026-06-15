@@ -84,6 +84,7 @@ def test_onnx_parity(tmp_path):
 
     model = Backbone(TINY).eval()
     path = export_onnx(model, tmp_path / "backbone.onnx")
+    assert not path.with_suffix(".onnx.data").exists()  # self-contained: weights inline, no sidecar
     sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
 
     for frames in (76, 98):  # inference window and a full ~1 s clip
