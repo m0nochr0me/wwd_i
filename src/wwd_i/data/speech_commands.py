@@ -51,6 +51,7 @@ def speech_commands_samplers(
     """
     import torchaudio
 
+    Path(root).mkdir(parents=True, exist_ok=True)  # torchaudio writes the archive into root but won't create it
     ds = torchaudio.datasets.SPEECHCOMMANDS(root=str(root), download=True)
     index: dict[str, list[int]] = {}
     for i in range(len(ds)):
