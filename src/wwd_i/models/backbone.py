@@ -131,9 +131,13 @@ def export_onnx(model: Backbone, path: str | Path, *, n_frames: int = 76) -> Pat
     the eval-mode PyTorch module within float tolerance. ``n_frames`` only sizes
     the trace dummy; the exported graph accepts any time length.
     """
+    import copy
+
     from torch.export import Dim
 
-    model = model.eval()
+    # Export on CPU (the deployment target) from a copy: handles a GPU-trained model
+    # and leaves the caller's model on its original device/mode.
+    model = copy.deepcopy(model).eval().cpu()
     dummy = torch.zeros(1, n_frames, model.config.n_mels)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
