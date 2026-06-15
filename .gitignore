@@ -23,3 +23,6 @@ wheels/
 
 scratch/
 deploy/
+
+# generated ONNX model artifacts
+artifacts/
