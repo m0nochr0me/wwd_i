@@ -5,7 +5,7 @@ import soundfile as sf
 pytest.importorskip("torch")  # mswc imports clips/episodic, which import torch
 
 from wwd_i.config import SAMPLE_RATE  # noqa: E402
-from wwd_i.data.mswc import _decode_16k_mono, _Subset, mswc_samplers  # noqa: E402
+from wwd_i.data.mswc import _decode_16k_mono, _WordSelector, mswc_samplers  # noqa: E402
 
 
 def test_decode_16k_mono_from_bytes():
@@ -22,29 +22,19 @@ def test_decode_16k_mono_from_bytes():
     assert len(_decode_16k_mono({"bytes": buf16.getvalue()})) == SAMPLE_RATE
 
 
-def test_subset_caps_clips_per_word():
-    sub = _Subset(n_words=3, clips_per_word=2)
-    assert [sub.take("a") for _ in range(4)] == [0, 1, None, None]  # >2 clips dropped
-    assert not sub.done
+def test_word_selector_deterministic_and_alphabet_spread():
+    sel = _WordSelector(n_words=100, vocab_total=1000, seed=0)
+    assert sel.keep("hello") == sel.keep("hello")  # deterministic
+
+    words = [f"{c}{i}" for c in "abcdefghijklmnopqrstuvwxyz" for i in range(40)]  # ~1040 words, a..z
+    kept = [w for w in words if sel.keep(w)]
+    assert 50 < len(kept) < 160  # ~100 of ~1040 (loose statistical bounds)
+    assert len({w[0] for w in kept}) > 10  # spread across many starting letters, not just 'a'
 
 
-def test_subset_done_when_n_words_full_no_vocab_cap():
-    sub = _Subset(n_words=2, clips_per_word=1)
-    assert sub.take("a") == 0
-    assert not sub.done
-    assert sub.take("b") == 0  # second full word -> done
-    assert sub.done
-    assert sub.take("c") == 0  # still accepts new words (no vocabulary cap)
-
-
-def test_subset_selected_keeps_fullest():
-    sub = _Subset(n_words=2, clips_per_word=3)
-    for _ in range(3):
-        sub.take("a")
-    for _ in range(3):
-        sub.take("b")
-    sub.take("c")  # under-filled, must be dropped
-    assert sub.selected() == ["a", "b"]
+def test_word_selector_keeps_all_when_target_exceeds_total():
+    sel = _WordSelector(n_words=1000, vocab_total=100, seed=0)
+    assert all(sel.keep(f"w{i}") for i in range(50))  # threshold >= modulus -> keep everything
 
 
 def test_mswc_samplers_random_held_out(tmp_path):
