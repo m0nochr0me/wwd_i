@@ -1,0 +1,67 @@
+[project]
+name = "wwd-i"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
+
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+    "pre-commit>=4.6.0",
+    "ruff>=0.15.17",
+]
+
+
+[tool.ruff]
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "C90", "UP"]
+ignore = ["TC001", "TC002", "TC003", "E501", "RUF012"]
+unfixable = ["TC"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15

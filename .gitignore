@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+.coverage*
+build/
+dist/
+wheels/
+*.egg-info
+.ruff-cache/
+.ruff_cache/
+.tmp-workspace/
+
+.env
+*.env
+!example*.env
+.credentials.json
+
+.zed/
+.github/
+.vscode/
+.claude/
+.mcp.json
+
+scratch/
+deploy/
