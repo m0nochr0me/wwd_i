@@ -87,12 +87,12 @@ def test_onnx_parity(tmp_path):
     assert not path.with_suffix(".onnx.data").exists()  # self-contained: weights inline, no sidecar
     sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
 
-    for frames in (76, 98):  # inference window and a full ~1 s clip
-        mel = torch.randn(1, frames, N_MELS)
+    for batch, frames in ((1, 76), (1, 98), (5, 76)):  # stream window, full clip, batched embed
+        mel = torch.randn(batch, frames, N_MELS)
         with torch.no_grad():
             ref = model(mel).numpy()
         onnx_out = sess.run(None, {"mel": mel.numpy()})[0]
-        assert onnx_out.shape == ref.shape
+        assert onnx_out.shape == ref.shape == (batch, model.config.embedding_dim)
         assert np.max(np.abs(onnx_out - ref)) < 1e-3
 
 

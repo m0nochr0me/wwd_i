@@ -142,7 +142,7 @@ def export_onnx(model: Backbone, path: str | Path, *, n_frames: int = 76) -> Pat
     # Export on CPU (the deployment target) from a copy: handles a GPU-trained model
     # and leaves the caller's model on its original device/mode.
     model = copy.deepcopy(model).eval().cpu()
-    dummy = torch.zeros(1, n_frames, model.config.n_mels)
+    dummy = torch.zeros(2, n_frames, model.config.n_mels)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(
@@ -152,7 +152,8 @@ def export_onnx(model: Backbone, path: str | Path, *, n_frames: int = 76) -> Pat
         dynamo=True,
         input_names=["mel"],
         output_names=["embedding"],
-        dynamic_shapes={"mel": {1: Dim("frames")}},
+        # Batch dynamic too (=1 at stream time, but lets head training embed many windows at once).
+        dynamic_shapes={"mel": {0: Dim("batch", min=1), 1: Dim("frames", min=1)}},
         external_data=False,
         verbose=False,
     )
