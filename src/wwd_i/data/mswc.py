@@ -81,7 +81,7 @@ def prepare_mswc(
     n_words: int,
     clips_per_word: int,
     dataset: str = "MLCommons/ml_spoken_words",
-    config: str = "en",
+    config: str = "en_wav",  # MSWC configs are {lang}_wav / {lang}_opus
     split: str = "train",
     word_key: str = "keyword",
     max_stream: int = 2_000_000,
@@ -147,7 +147,7 @@ def main() -> None:
     p.add_argument("--n-words", type=int, default=500)
     p.add_argument("--clips-per-word", type=int, default=80)
     p.add_argument("--dataset", default="MLCommons/ml_spoken_words")
-    p.add_argument("--config", default="en")
+    p.add_argument("--config", default="en_wav", help="MSWC config, e.g. en_wav (16 kHz) or en_opus")
     p.add_argument("--split", default="train")
     p.add_argument("--word-key", default="keyword")
     p.add_argument("--max-stream", type=int, default=2_000_000)
