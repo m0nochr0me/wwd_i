@@ -1,8 +1,9 @@
 """Train the from-scratch backbone with cosine-prototypical metric learning.
 
 Phase-2 driver. Runs locally on CPU for a quick check (use ``--limit`` for a fast
-smoke run) or on Colab GPU for the real run. It builds the Speech Commands
-episodic samplers, optimizes the prototypical loss over the training words, and
+smoke run) or on Colab GPU for the real run. It builds episodic samplers over
+Speech Commands (``--dataset speech_commands``) or a prepared MSWC directory
+(``--dataset mswc``; see ``data/mswc.py``), optimizes the prototypical loss, and
 every ``--eval-every`` steps reports the few-shot probe on held-out words against
 a mel-only baseline (the Phase-2 gate). The best checkpoint is saved and the
 frozen backbone is exported to ONNX.
@@ -17,6 +18,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from wwd_i.data.mswc import mswc_samplers
 from wwd_i.data.speech_commands import speech_commands_samplers
 from wwd_i.features.melspec import MelSpectrogram
 from wwd_i.models.backbone import Backbone, BackboneConfig, export_onnx
@@ -32,7 +34,12 @@ def train(args: argparse.Namespace) -> None:
     model = Backbone(BackboneConfig(embedding_dim=args.embedding_dim)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    train_sampler, held_sampler = speech_commands_samplers(args.root, limit=args.limit, seed=args.seed)
+    if args.dataset == "mswc":
+        train_sampler, held_sampler = mswc_samplers(
+            args.root, n_held_out=args.mswc_held_out, limit=args.limit, seed=args.seed
+        )
+    else:
+        train_sampler, held_sampler = speech_commands_samplers(args.root, limit=args.limit, seed=args.seed)
 
     def embed(audio: Tensor) -> Tensor:
         return model(melspec(audio))
@@ -81,7 +88,9 @@ def train(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Train the wwd_i backbone (Phase 2).")
-    p.add_argument("--root", default="data/speech_commands", help="Speech Commands download/cache dir")
+    p.add_argument("--dataset", choices=("speech_commands", "mswc"), default="speech_commands")
+    p.add_argument("--root", default="data/speech_commands", help="dataset dir (download/cache or prepared MSWC)")
+    p.add_argument("--mswc-held-out", type=int, default=50, help="random words reserved for the probe (mswc)")
     p.add_argument("--limit", type=int, default=None, help="cap clips per word (fast local smoke run)")
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--lr", type=float, default=1e-3)
