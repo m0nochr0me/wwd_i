@@ -5,7 +5,17 @@ import soundfile as sf
 pytest.importorskip("torch")  # mswc imports clips/episodic, which import torch
 
 from wwd_i.config import SAMPLE_RATE  # noqa: E402
-from wwd_i.data.mswc import _Subset, mswc_samplers  # noqa: E402
+from wwd_i.data.mswc import _Subset, _to_16k_mono, mswc_samplers  # noqa: E402
+
+
+def test_to_16k_mono_resamples_and_downmixes():
+    stereo_48k = np.zeros((48000, 2), dtype=np.float32)  # 1 s, 48 kHz, stereo
+    out = _to_16k_mono({"array": stereo_48k, "sampling_rate": 48000})
+    assert out.ndim == 1 and out.dtype == np.float32
+    assert abs(len(out) - SAMPLE_RATE) <= 2  # downmixed + resampled to ~16k samples
+
+    mono_16k = np.zeros(SAMPLE_RATE, dtype=np.float32)
+    assert len(_to_16k_mono({"array": mono_16k, "sampling_rate": SAMPLE_RATE})) == SAMPLE_RATE
 
 
 def test_subset_caps_clips_per_word():

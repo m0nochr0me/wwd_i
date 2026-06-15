@@ -75,6 +75,19 @@ def mswc_peek(*, dataset: str, config: str, split: str, n: int = 1) -> None:
             print(f"  audio.sampling_rate = {audio.get('sampling_rate')}, samples = {len(audio.get('array', []))}")
 
 
+def _to_16k_mono(audio: dict) -> np.ndarray:
+    """HF audio dict -> 16 kHz mono float32 (downmix + soxr resample as needed)."""
+    wav = np.asarray(audio["array"], dtype=np.float32)
+    if wav.ndim > 1:
+        wav = wav.mean(axis=1)
+    sr = int(audio["sampling_rate"])
+    if sr != SAMPLE_RATE:
+        import soxr
+
+        wav = soxr.resample(wav, sr, SAMPLE_RATE)
+    return np.ascontiguousarray(wav, dtype=np.float32)
+
+
 def prepare_mswc(
     root: str | Path,
     *,
@@ -88,15 +101,13 @@ def prepare_mswc(
 ) -> list[str]:
     """Stream a capped MSWC subset to ``root`` as 16 kHz ``{word}/{n}.wav`` clips.
 
-    Returns the materialized word list. Resampling to 16 kHz is delegated to the
-    `datasets` Audio decoder. Idempotent only at the file level (re-running
+    Returns the materialized word list. Clips are downmixed and resampled to 16 kHz
+    with soxr (no librosa needed). Idempotent only at the file level (re-running
     overwrites clip files); delete ``root`` to start clean.
     """
-    import datasets
-
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-    stream = _load_stream(dataset, config, split).cast_column("audio", datasets.Audio(sampling_rate=SAMPLE_RATE))
+    stream = _load_stream(dataset, config, split)
 
     subset = _Subset(n_words, clips_per_word)
     written = 0
@@ -108,12 +119,9 @@ def prepare_mswc(
             if subset.done:
                 break
             continue
-        wav = np.asarray(example["audio"]["array"], dtype=np.float32)
-        if wav.ndim > 1:
-            wav = wav.mean(axis=1)
         out = root / example[word_key] / f"{index:04d}.wav"
         out.parent.mkdir(parents=True, exist_ok=True)
-        sf.write(out, wav, SAMPLE_RATE)
+        sf.write(out, _to_16k_mono(example["audio"]), SAMPLE_RATE)
         written += 1
         if subset.done:
             break
