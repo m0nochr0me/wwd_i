@@ -28,12 +28,23 @@ def test_subset_caps_clips_per_word():
     assert not sub.done
 
 
-def test_subset_caps_vocabulary_and_reports_done():
+def test_subset_done_when_n_words_full_no_vocab_cap():
     sub = _Subset(n_words=2, clips_per_word=1)
     assert sub.take("a") == 0
-    assert sub.take("b") == 0
-    assert sub.take("c") is None  # third word ignored once vocabulary is full
-    assert sub.done  # both words reached their clip quota
+    assert not sub.done
+    assert sub.take("b") == 0  # second full word -> done
+    assert sub.done
+    assert sub.take("c") == 0  # still accepts new words (no vocabulary cap)
+
+
+def test_subset_selected_keeps_fullest():
+    sub = _Subset(n_words=2, clips_per_word=3)
+    for _ in range(3):
+        sub.take("a")
+    for _ in range(3):
+        sub.take("b")
+    sub.take("c")  # under-filled, must be dropped
+    assert sub.selected() == ["a", "b"]
 
 
 def test_mswc_samplers_random_held_out(tmp_path):

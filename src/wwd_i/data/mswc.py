@@ -14,6 +14,7 @@ schema before a large prepare. See docs/implementation-plan.md Phase 2.
 
 import argparse
 import io
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -26,28 +27,37 @@ from wwd_i.data.episodic import EpisodicSampler
 
 
 class _Subset:
-    """Caps a stream to ``n_words`` words and ``clips_per_word`` clips each."""
+    """Tracks clips per word; ``done`` once ``n_words`` words reach ``clips_per_word``.
+
+    No vocabulary cap while streaming (a shuffled stream interleaves words);
+    ``selected`` keeps the fullest ``n_words`` words and drops under-filled ones, so
+    rare words never stall the stop condition.
+    """
 
     def __init__(self, n_words: int, clips_per_word: int) -> None:
         self.n_words = n_words
         self.clips_per_word = clips_per_word
         self.counts: dict[str, int] = {}
+        self._full = 0
 
     def take(self, word: str) -> int | None:
-        """Return the next local index to write for ``word``, or None to skip it."""
-        count = self.counts.get(word)
-        if count is None:
-            if len(self.counts) >= self.n_words:
-                return None  # vocabulary full; ignore unseen words
-            count = self.counts[word] = 0
+        """Return the next local index to write for ``word``, or None if it is full."""
+        count = self.counts.get(word, 0)
         if count >= self.clips_per_word:
             return None
         self.counts[word] = count + 1
+        if self.counts[word] == self.clips_per_word:
+            self._full += 1
         return count
 
     @property
     def done(self) -> bool:
-        return len(self.counts) >= self.n_words and all(c >= self.clips_per_word for c in self.counts.values())
+        return self._full >= self.n_words
+
+    def selected(self) -> list[str]:
+        """The ``n_words`` fullest words, sorted (drops under-filled partials)."""
+        fullest = sorted(self.counts, key=lambda w: self.counts[w], reverse=True)[: self.n_words]
+        return sorted(fullest)
 
 
 def _load_stream(dataset: str, config: str, split: str):
@@ -105,40 +115,47 @@ def prepare_mswc(
     config: str = "en_wav",  # MSWC configs are {lang}_wav / {lang}_opus
     split: str = "train",
     word_key: str = "keyword",
-    max_stream: int = 2_000_000,
+    shuffle_buffer: int = 10_000,
+    max_stream: int = 300_000,
+    seed: int = 0,
 ) -> list[str]:
-    """Stream a capped MSWC subset to ``root`` as 16 kHz ``{word}/{n}.wav`` clips.
+    """Stream a capped, shuffled MSWC subset to ``root`` as 16 kHz ``{word}/{n}.wav``.
 
-    Returns the materialized word list. Clips are downmixed and resampled to 16 kHz
-    with soxr (no librosa needed). Idempotent only at the file level (re-running
-    overwrites clip files); delete ``root`` to start clean.
+    Shuffling front-loads frequent words so ``n_words`` words reach ``clips_per_word``
+    quickly; streaming stops then (or at ``max_stream``). The fullest ``n_words``
+    words are kept and under-filled words pruned, for a roughly balanced vocabulary.
+    Audio is decoded with soundfile + soxr (no librosa). Delete ``root`` to restart.
     """
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     stream = _load_stream(dataset, config, split)
+    if shuffle_buffer:
+        stream = stream.shuffle(seed=seed, buffer_size=shuffle_buffer)
 
     subset = _Subset(n_words, clips_per_word)
-    written = 0
     for i, example in enumerate(stream):
-        if i >= max_stream:
+        if i >= max_stream or subset.done:
             break
-        index = subset.take(example[word_key])
+        word = example[word_key]
+        index = subset.take(word)
         if index is None:
-            if subset.done:
-                break
             continue
-        out = root / example[word_key] / f"{index:04d}.wav"
+        out = root / word / f"{index:04d}.wav"
         out.parent.mkdir(parents=True, exist_ok=True)
         sf.write(out, _decode_16k_mono(example["audio"]), SAMPLE_RATE)
-        written += 1
-        if subset.done:
-            break
 
-    words = sorted(word for word, count in subset.counts.items() if count > 0)
-    if not words:
+    kept = subset.selected()
+    if not kept:
         raise RuntimeError(f"no clips materialized from {dataset}/{config}; check --config/--word-key with --inspect")
-    print(f"materialized {written} clips across {len(words)} words under {root}")
-    return words
+    kept_set = set(kept)
+    pruned = 0
+    for word in subset.counts:
+        if word not in kept_set:
+            shutil.rmtree(root / word, ignore_errors=True)
+            pruned += 1
+    total = sum(subset.counts[word] for word in kept)
+    print(f"materialized {total} clips across {len(kept)} words under {root} (pruned {pruned} under-filled)")
+    return kept
 
 
 def mswc_samplers(
@@ -166,7 +183,9 @@ def main() -> None:
     p.add_argument("--config", default="en_wav", help="MSWC config, e.g. en_wav (16 kHz) or en_opus")
     p.add_argument("--split", default="train")
     p.add_argument("--word-key", default="keyword")
-    p.add_argument("--max-stream", type=int, default=2_000_000)
+    p.add_argument("--shuffle-buffer", type=int, default=10_000, help="stream shuffle buffer (0 to disable)")
+    p.add_argument("--max-stream", type=int, default=300_000, help="safety cap on clips streamed")
+    p.add_argument("--seed", type=int, default=0)
     p.add_argument("--inspect", action="store_true", help="print the schema of one streamed example and exit")
     args = p.parse_args()
 
@@ -181,7 +200,9 @@ def main() -> None:
         config=args.config,
         split=args.split,
         word_key=args.word_key,
+        shuffle_buffer=args.shuffle_buffer,
         max_stream=args.max_stream,
+        seed=args.seed,
     )
 
 
