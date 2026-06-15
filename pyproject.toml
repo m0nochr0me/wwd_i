@@ -21,12 +21,29 @@ requires = ["uv_build>=0.10.9,<0.12.0"]
 build-backend = "uv_build"
 
 
+# torch/torchaudio are training/export-only (CPU build for local dev; Colab
+# provides its own CUDA build). Inference ships with onnxruntime alone.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
+
+
 [dependency-groups]
 dev = [
     "ipykernel>=7.3.0",
     "pre-commit>=4.6.0",
     "pytest>=9.1.0",
     "ruff>=0.15.17",
+]
+train = [
+    "onnxscript>=0.7.0",
+    "torch>=2.12.0",
+    "torchaudio>=2.11.0",
 ]
 
 
