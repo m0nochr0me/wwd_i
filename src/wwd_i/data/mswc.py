@@ -13,10 +13,12 @@ schema before a large prepare. See docs/implementation-plan.md Phase 2.
 """
 
 import argparse
+import io
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+import soxr
 
 from wwd_i.config import SAMPLE_RATE
 from wwd_i.data.clips import index_clips, split_samplers
@@ -57,7 +59,10 @@ def _load_stream(dataset: str, config: str, split: str):
             f"datasets {datasets.__version__} removed script-based datasets, which {dataset} still uses. "
             "Install an older release:  uv pip install --python .venv/bin/python 'datasets<4'"
         )
-    return datasets.load_dataset(dataset, config, split=split, streaming=True, trust_remote_code=True)
+    stream = datasets.load_dataset(dataset, config, split=split, streaming=True, trust_remote_code=True)
+    # Decode audio ourselves with soundfile; datasets' Audio decoder imports librosa
+    # (which needs numba -> no py3.14 wheel), so turn its decoding off.
+    return stream.cast_column("audio", datasets.Audio(decode=False))
 
 
 def mswc_peek(*, dataset: str, config: str, split: str, n: int = 1) -> None:
@@ -72,20 +77,23 @@ def mswc_peek(*, dataset: str, config: str, split: str, n: int = 1) -> None:
                 print(f"  candidate word field {key!r} = {example[key]!r}")
         audio = example.get("audio")
         if isinstance(audio, dict):
-            print(f"  audio.sampling_rate = {audio.get('sampling_rate')}, samples = {len(audio.get('array', []))}")
+            print(f"  audio fields = {list(audio.keys())}, bytes={'yes' if audio.get('bytes') else 'no'}")
+            try:
+                wav = _decode_16k_mono(audio)
+                print(f"  decoded OK -> {len(wav)} samples @ 16 kHz mono")
+            except Exception as exc:
+                print(f"  decode FAILED: {exc!r}")
 
 
-def _to_16k_mono(audio: dict) -> np.ndarray:
-    """HF audio dict -> 16 kHz mono float32 (downmix + soxr resample as needed)."""
-    wav = np.asarray(audio["array"], dtype=np.float32)
-    if wav.ndim > 1:
-        wav = wav.mean(axis=1)
-    sr = int(audio["sampling_rate"])
+def _decode_16k_mono(audio: dict) -> np.ndarray:
+    """Undecoded HF audio ({bytes|path}) -> 16 kHz mono float32 via soundfile."""
+    raw = audio.get("bytes")
+    source = io.BytesIO(raw) if raw is not None else audio["path"]
+    data, sr = sf.read(source, dtype="float32", always_2d=True)
+    mono = data.mean(axis=1)
     if sr != SAMPLE_RATE:
-        import soxr
-
-        wav = soxr.resample(wav, sr, SAMPLE_RATE)
-    return np.ascontiguousarray(wav, dtype=np.float32)
+        mono = soxr.resample(mono, sr, SAMPLE_RATE)
+    return np.ascontiguousarray(mono, dtype=np.float32)
 
 
 def prepare_mswc(
@@ -121,7 +129,7 @@ def prepare_mswc(
             continue
         out = root / example[word_key] / f"{index:04d}.wav"
         out.parent.mkdir(parents=True, exist_ok=True)
-        sf.write(out, _to_16k_mono(example["audio"]), SAMPLE_RATE)
+        sf.write(out, _decode_16k_mono(example["audio"]), SAMPLE_RATE)
         written += 1
         if subset.done:
             break
