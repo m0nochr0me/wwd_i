@@ -22,6 +22,7 @@ from torch import Tensor, nn
 class HeadConfig:
     embedding_dim: int = 96
     hidden: int = 48
+    dropout: float = 0.2
 
 
 class WakeHead(nn.Module):
@@ -41,6 +42,7 @@ class WakeHead(nn.Module):
         self.hidden = c.hidden
         self.x2h = nn.Linear(c.embedding_dim, 3 * c.hidden)  # input -> reset/update/new gates
         self.h2h = nn.Linear(c.hidden, 3 * c.hidden)  # hidden -> reset/update/new gates
+        self.drop = nn.Dropout(c.dropout)  # on the per-hop output (not the recurrent state)
         self.fc = nn.Linear(c.hidden, 1)
 
     def _step(self, x: Tensor, h: Tensor) -> Tensor:
@@ -56,7 +58,7 @@ class WakeHead(nn.Module):
         logits = []
         for t in range(emb.shape[1]):
             h = self._step(emb[:, t, :], h)
-            logits.append(self.fc(h))  # [B, 1]
+            logits.append(self.fc(self.drop(h)))  # [B, 1]
         return torch.cat(logits, dim=1), h.unsqueeze(0)  # logits [B, T], hn [1, B, H]
 
     def clip_logits(self, emb: Tensor) -> Tensor:

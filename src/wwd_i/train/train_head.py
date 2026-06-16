@@ -11,6 +11,7 @@ See docs/architecture.md §6-§7 and implementation-plan.md Phase 4.
 """
 
 import argparse
+import copy
 import json
 from pathlib import Path
 
@@ -96,12 +97,15 @@ def build_dataset(args: argparse.Namespace, aug: Augmenter) -> tuple[list[np.nda
     return pos + neg, labels
 
 
+_THRESHOLDS = np.concatenate([np.linspace(0.05, 0.95, 19), [0.97, 0.98, 0.99, 0.995, 0.999]])
+
+
 def calibrate(prob: np.ndarray, y: np.ndarray, *, target_fa: float, target_fr: float) -> dict:
-    """Sweep thresholds; pick the lowest-FR point meeting FA<target, report the DET."""
+    """Sweep thresholds (toward 1.0); pick the lowest-FR point meeting FA<target."""
     pos, neg = prob[y == 1], prob[y == 0]
     neg_hours = len(neg) * CLIP_SECONDS / 3600.0
     det = []
-    for thr in np.linspace(0.05, 0.95, 19):
+    for thr in _THRESHOLDS:
         fr = float(np.mean(pos < thr)) if len(pos) else 1.0
         fa = int(np.sum(neg >= thr))
         det.append({"threshold": round(float(thr), 3), "fr": fr, "fa_per_hr": fa / neg_hours, "fa": fa})
@@ -111,9 +115,16 @@ def calibrate(prob: np.ndarray, y: np.ndarray, *, target_fa: float, target_fr: f
     return {"chosen": chosen, "det": det, "neg_hours": neg_hours}
 
 
-def _train_loop(head: WakeHead, x: torch.Tensor, y: torch.Tensor, tr: np.ndarray, args: argparse.Namespace) -> None:
-    opt = torch.optim.Adam(head.parameters(), lr=args.lr)
+def _fit(head: WakeHead, x: torch.Tensor, y: torch.Tensor, tr: np.ndarray, val: np.ndarray, args) -> None:
+    """Train in place, keeping the best-val-loss weights (early-stopping-style).
+
+    A tiny head on a memorizable set overfits fast (train acc -> ~1.0 while val
+    degrades), so we regularize (AdamW weight decay + dropout) and restore the
+    lowest-val-loss checkpoint rather than the last epoch.
+    """
+    opt = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     lossfn = torch.nn.BCEWithLogitsLoss()
+    best_loss, best_state = float("inf"), copy.deepcopy(head.state_dict())
     for epoch in range(1, args.epochs + 1):
         head.train()
         perm = tr[torch.randperm(len(tr)).numpy()]
@@ -123,11 +134,17 @@ def _train_loop(head: WakeHead, x: torch.Tensor, y: torch.Tensor, tr: np.ndarray
             opt.zero_grad()
             loss.backward()
             opt.step()
+        head.eval()
+        with torch.no_grad():
+            vloss = lossfn(head.clip_logits(x[val]), y[val]).item()
+        if vloss < best_loss:
+            best_loss, best_state = vloss, copy.deepcopy(head.state_dict())
         if epoch % args.log_every == 0 or epoch == args.epochs:
-            head.eval()
             with torch.no_grad():
-                acc = ((torch.sigmoid(head.clip_logits(x[tr])) >= 0.5).float() == y[tr]).float().mean()
-            print(f"epoch {epoch:>3} | loss {loss.item():.4f} | train acc {acc.item():.3f}")
+                acc = ((torch.sigmoid(head.clip_logits(x[tr])) >= 0.5).float() == y[tr]).float().mean().item()
+            print(f"epoch {epoch:>4} | train loss {loss.item():.4f} | val loss {vloss:.4f} | train acc {acc:.3f}")
+    head.load_state_dict(best_state)
+    print(f"restored best-val checkpoint (val loss {best_loss:.4f})")
 
 
 def train(args: argparse.Namespace) -> None:
@@ -140,26 +157,27 @@ def train(args: argparse.Namespace) -> None:
     x = torch.from_numpy(embed_clips(clips, session)).float()
     y = torch.from_numpy(labels)
 
+    # train / val (checkpoint selection) / test (honest calibration + gate)
     idx = np.random.default_rng(args.seed).permutation(len(x))
-    n_val = max(2, int(0.2 * len(x)))
-    val, tr = idx[:n_val], idx[n_val:]
+    n_hold = max(2, int(0.15 * len(x)))
+    test, val, tr = idx[:n_hold], idx[n_hold : 2 * n_hold], idx[2 * n_hold :]
 
-    head = WakeHead(HeadConfig(hidden=args.hidden))
-    _train_loop(head, x, y, tr, args)
+    head = WakeHead(HeadConfig(hidden=args.hidden, dropout=args.dropout))
+    _fit(head, x, y, tr, val, args)
 
     head.eval()
     with torch.no_grad():
-        val_prob = torch.sigmoid(head.clip_logits(x[val])).numpy()
-    result = calibrate(val_prob, y[val].numpy(), target_fa=args.target_fa, target_fr=args.target_fr)
+        test_prob = torch.sigmoid(head.clip_logits(x[test])).numpy()
+    result = calibrate(test_prob, y[test].numpy(), target_fa=args.target_fa, target_fr=args.target_fr)
 
     c = result["chosen"]
-    print(f"\nDET (val, {result['neg_hours']:.2f} h negatives):")
+    print(f"\nDET (held-out test, {result['neg_hours']:.2f} h negatives):")
     for r in result["det"]:
         mark = "  <-- chosen" if r is c else ""
-        print(f"  thr {r['threshold']:.2f} | FR {r['fr']:.3f} | FA {r['fa_per_hr']:.2f}/hr{mark}")
+        print(f"  thr {r['threshold']:.3f} | FR {r['fr']:.3f} | FA {r['fa_per_hr']:.2f}/hr{mark}")
     verdict = "PASS" if c["passed"] else "FAIL"
     print(
-        f"\n[gate] thr {c['threshold']:.2f} -> FA {c['fa_per_hr']:.2f}/hr, FR {c['fr']:.3f} "
+        f"\n[gate] thr {c['threshold']:.3f} -> FA {c['fa_per_hr']:.2f}/hr, FR {c['fr']:.3f} "
         f"(targets FA<{args.target_fa}/hr, FR<{args.target_fr}) {verdict}"
     )
 
@@ -188,9 +206,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-bg-neg", type=int, default=4000, help="background negative clips (more -> sharper FA/hr)")
     p.add_argument("--max-bg", type=int, default=2000, help="background clips decoded into the pool")
     p.add_argument("--hidden", type=int, default=48)
-    p.add_argument("--epochs", type=int, default=40)
+    p.add_argument("--epochs", type=int, default=60, help="best-val checkpoint is kept, so this is an upper bound")
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--weight-decay", type=float, default=1e-2, help="AdamW regularization (fights overfitting)")
+    p.add_argument("--dropout", type=float, default=0.2, help="head dropout (fights overfitting)")
     p.add_argument("--target-fa", type=float, default=0.5, help="false accepts / hour gate")
     p.add_argument("--target-fr", type=float, default=0.05, help="false reject rate gate")
     p.add_argument("--refractory", type=float, default=1.0, help="debounce seconds (recorded for the runtime)")
