@@ -46,13 +46,23 @@ def _windows(mel: np.ndarray) -> np.ndarray:
     return np.stack([mel[i * hop : i * hop + WINDOW] for i in range(n)]).astype(np.float32)
 
 
-def embed_clips(clips: list[np.ndarray], session: ort.InferenceSession) -> np.ndarray:
-    """Frozen-backbone embedding sequences for fixed-length clips -> ``[N, W, D]``."""
-    seqs = [_windows(compute_logmel(c)) for c in clips]
-    w = seqs[0].shape[0]
+def embed_clips(clips: list[np.ndarray], session: ort.InferenceSession, *, batch: int = 256) -> np.ndarray:
+    """Frozen-backbone embedding sequences for fixed-length clips -> ``[N, W, D]``.
+
+    Embedded in chunks of ``batch`` clips (one ORT call each) with progress: a
+    single call over the whole set allocates multi-GB backbone activations and
+    appears to hang.
+    """
     name = session.get_inputs()[0].name
-    emb = session.run(None, {name: np.concatenate(seqs, axis=0)})[0]  # [N*W, D]
-    return emb.reshape(len(clips), w, emb.shape[-1])
+    out: list[np.ndarray] = []
+    print(f"embedding {len(clips)} clips through the frozen backbone...", flush=True)
+    for start in range(0, len(clips), batch):
+        chunk = clips[start : start + batch]
+        seqs = [_windows(compute_logmel(c)) for c in chunk]
+        emb = session.run(None, {name: np.concatenate(seqs, axis=0)})[0]  # [len(chunk)*W, D]
+        out.append(emb.reshape(len(chunk), seqs[0].shape[0], emb.shape[-1]))
+        print(f"  {min(start + batch, len(clips))}/{len(clips)}", flush=True)
+    return np.concatenate(out, axis=0)
 
 
 def _augmented(paths: list[Path], aug: Augmenter, n_aug: int, length: int) -> list[np.ndarray]:

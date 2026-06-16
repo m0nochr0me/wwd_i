@@ -69,10 +69,11 @@ def test_embed_clips_with_packaged_backbone():
     import onnxruntime as ort
 
     sess = ort.InferenceSession(_default_backbone(), providers=["CPUExecutionProvider"])
-    clips = [np.random.default_rng(i).standard_normal(int(1.5 * SAMPLE_RATE)).astype(np.float32) for i in range(3)]
-    emb = embed_clips(clips, sess)
-    assert emb.shape == (3, 10, D)
+    clips = [np.random.default_rng(i).standard_normal(int(1.5 * SAMPLE_RATE)).astype(np.float32) for i in range(5)]
+    emb = embed_clips(clips, sess, batch=2)  # exercises the chunk boundary
+    assert emb.shape == (5, 10, D)
     assert np.allclose(np.linalg.norm(emb, axis=-1), 1.0, atol=1e-4)  # backbone L2-normalizes
+    assert np.allclose(emb, embed_clips(clips, sess, batch=100), atol=1e-5)  # chunked == single call
 
 
 def test_calibrate_pass_and_fail():
