@@ -1,8 +1,18 @@
+import os
+
 import numpy as np
 import soundfile as sf
 
 from wwd_i.config import SAMPLE_RATE
-from wwd_i.data.backgrounds import find_audio, load_background_pool
+from wwd_i.data.backgrounds import _quiet_stderr, find_audio, load_background_pool
+
+
+def test_quiet_stderr_suppresses_and_restores(capfd):
+    with _quiet_stderr():
+        os.write(2, b"DECODER_NOISE\n")  # C-level write, like libmpg123
+    os.write(2, b"AFTER\n")
+    err = capfd.readouterr().err
+    assert "DECODER_NOISE" not in err and "AFTER" in err
 
 
 def test_find_audio_recursive(tmp_path):
