@@ -71,21 +71,23 @@ def load_background_pool(
     min_len = int(min_seconds * SAMPLE_RATE)
     pool: list[np.ndarray] = []
     skipped = 0
-    with _quiet_stderr():
-        for path in paths:
-            if len(pool) >= max_clips:
-                break
-            try:
+    print(f"decoding background pool: target {max_clips} clips from {len(paths)} files...", flush=True)
+    for i, path in enumerate(paths, 1):
+        if len(pool) >= max_clips:
+            break
+        try:
+            with _quiet_stderr():  # per file: silence decoder chatter, keep stdout progress live
                 wav = load_wav(path)
-            except Exception:
-                skipped += 1  # corrupt / unsupported codec
-                continue
-            if len(wav) >= min_len and np.all(np.isfinite(wav)):
-                pool.append(wav)
-            else:
-                skipped += 1  # too short or garbage from a partial decode
+        except Exception:
+            skipped += 1  # corrupt / unsupported codec
+            continue
+        if len(wav) >= min_len and np.all(np.isfinite(wav)):
+            pool.append(wav)
+        else:
+            skipped += 1  # too short or garbage from a partial decode
+        if i % 500 == 0:
+            print(f"  scanned {i}/{len(paths)} -> {len(pool)} kept, {skipped} skipped", flush=True)
     if not pool:
         raise RuntimeError(f"no decodable clips >= {min_seconds}s under {dirs}")
-    if skipped:
-        print(f"background pool: {len(pool)} clips ({skipped} corrupt/short skipped)", flush=True)
+    print(f"background pool: {len(pool)} clips ({skipped} corrupt/short skipped)", flush=True)
     return pool
