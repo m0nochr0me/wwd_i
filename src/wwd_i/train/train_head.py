@@ -76,25 +76,46 @@ def _augmented(paths: list[Path], aug: Augmenter, n_aug: int, length: int) -> li
     return out
 
 
-def build_dataset(args: argparse.Namespace, aug: Augmenter) -> tuple[list[np.ndarray], np.ndarray]:
+def build_embeddings(
+    args: argparse.Namespace, aug: Augmenter, session: ort.InferenceSession
+) -> tuple[np.ndarray, np.ndarray]:
+    """Assemble ``(embeddings [N, W, D], labels [N])`` for the head.
+
+    Positives and hard negatives are augmented clips embedded through the frozen
+    backbone here. Bulk background negatives come **pre-embedded** from
+    ``--bg-neg-emb`` (see ``preprocess_bg``) when given — bounded RAM regardless of
+    count — else are sampled and embedded from the in-RAM pool (legacy path).
+    """
     length = int(CLIP_SECONDS * SAMPLE_RATE)
     pos_paths = sorted(Path(args.positives).rglob("*.wav"))
     if not pos_paths:
         raise RuntimeError(f"no positive wavs under {args.positives}")
-    pos = _augmented(pos_paths, aug, args.n_aug, length)
+    pos_emb = embed_clips(_augmented(pos_paths, aug, args.n_aug, length), session)
 
-    neg: list[np.ndarray] = []
+    neg_parts: list[np.ndarray] = []
     if args.hard_neg:
-        neg += _augmented(sorted(Path(args.hard_neg).rglob("*.wav")), aug, args.n_aug, length)
-    if aug.pool:
+        hard = _augmented(sorted(Path(args.hard_neg).rglob("*.wav")), aug, args.n_aug, length)
+        if hard:
+            neg_parts.append(embed_clips(hard, session))
+    if args.bg_neg_emb:
+        cache = np.load(args.bg_neg_emb)
+        if cache.shape[1:] != pos_emb.shape[1:]:
+            raise RuntimeError(
+                f"--bg-neg-emb {args.bg_neg_emb} has shape {cache.shape}, expected (*, {pos_emb.shape[1]}, "
+                f"{pos_emb.shape[2]}) — rebuild it with preprocess_bg against the current backbone"
+            )
+        neg_parts.append(cache)
+    elif aug.pool:
         bg = sample_background_clips(aug.pool, args.n_bg_neg, length=length, seed=args.seed)
-        neg += [fixed_length(aug(c), length) for c in bg]
-    if not neg:
-        raise RuntimeError("no negatives — pass --background (recommended) and/or --hard-neg")
+        neg_parts.append(embed_clips([fixed_length(aug(c), length) for c in bg], session))
+    if not neg_parts:
+        raise RuntimeError("no negatives — pass --bg-neg-emb and/or --background and/or --hard-neg")
 
-    labels = np.array([1.0] * len(pos) + [0.0] * len(neg), dtype=np.float32)
-    print(f"dataset: {len(pos)} positive + {len(neg)} negative clips (n_aug={args.n_aug})")
-    return pos + neg, labels
+    neg_emb = np.concatenate(neg_parts, axis=0)
+    x = np.concatenate([pos_emb, neg_emb], axis=0)
+    y = np.array([1.0] * len(pos_emb) + [0.0] * len(neg_emb), dtype=np.float32)
+    print(f"dataset: {len(pos_emb)} positive + {len(neg_emb)} negative clips (n_aug={args.n_aug})")
+    return x, y
 
 
 _THRESHOLDS = np.concatenate([np.linspace(0.05, 0.95, 19), [0.97, 0.98, 0.99, 0.995, 0.999]])
@@ -151,11 +172,11 @@ def train(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
     pool = load_background_pool(args.background, max_clips=args.max_bg, seed=args.seed) if args.background else []
     aug = Augmenter(pool, seed=args.seed)
-    clips, labels = build_dataset(args, aug)
 
     session = ort.InferenceSession(args.backbone, providers=["CPUExecutionProvider"])
-    x = torch.from_numpy(embed_clips(clips, session)).float()
-    y = torch.from_numpy(labels)
+    x_np, y_np = build_embeddings(args, aug, session)
+    x = torch.from_numpy(x_np).float()
+    y = torch.from_numpy(y_np)
 
     # train / val (checkpoint selection) / test (honest calibration + gate)
     idx = np.random.default_rng(args.seed).permutation(len(x))
@@ -200,11 +221,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--word", default="wake", help="label for the calibration metadata")
     p.add_argument("--positives", required=True, help="dir of wake-phrase wavs (ElevenLabs)")
     p.add_argument("--hard-neg", help="dir of near-phrase wavs (ElevenLabs hard negatives)")
-    p.add_argument("--background", nargs="*", help="dirs of background audio (AudioSet/FMA/MSWC) for noise + negatives")
+    p.add_argument("--background", nargs="*", help="dirs of background audio for augmentation noise (e.g. noise_pool)")
+    p.add_argument(
+        "--bg-neg-emb", help="pre-embedded background negatives .npy from preprocess_bg (bypasses --n-bg-neg)"
+    )
     p.add_argument("--backbone", default=_default_backbone(), help="frozen backbone.onnx")
     p.add_argument("--n-aug", type=int, default=5, help="augmented variants per TTS clip")
-    p.add_argument("--n-bg-neg", type=int, default=4000, help="background negative clips (more -> sharper FA/hr)")
-    p.add_argument("--max-bg", type=int, default=2000, help="background clips decoded into the pool")
+    p.add_argument(
+        "--n-bg-neg",
+        type=int,
+        default=4000,
+        help="background negatives sampled from the pool (legacy; ignored with --bg-neg-emb)",
+    )
+    p.add_argument("--max-bg", type=int, default=2000, help="background clips decoded into the augmentation pool")
     p.add_argument("--hidden", type=int, default=48)
     p.add_argument("--epochs", type=int, default=60, help="best-val checkpoint is kept, so this is an upper bound")
     p.add_argument("--batch-size", type=int, default=128)
