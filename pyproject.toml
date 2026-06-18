@@ -39,6 +39,7 @@ dev = [
     "pre-commit>=4.6.0",
     "pytest>=9.1.0",
     "ruff>=0.15.17",
+    "sounddevice>=0.5.5",
 ]
 train = [
     "datasets>=2.20.0,<4.0.0",  # MSWC ships a loading script; datasets>=4 dropped script support

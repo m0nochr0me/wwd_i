@@ -101,6 +101,11 @@ def export_onnx(path: str | Path) -> Path:
 
     Uses the torch.export-based exporter; the model is conv + matmul + log, so the
     ONNX graph matches the PyTorch module within float tolerance.
+
+    Weights are written inline (``external_data=False``): the dynamo exporter
+    otherwise spills them to a ``{path}.data`` sidecar, which silently breaks the
+    model the moment the ``.onnx`` is moved or shipped without it (see
+    ``models.backbone.export_onnx``).
     """
     from torch.export import Dim
 
@@ -116,6 +121,7 @@ def export_onnx(path: str | Path) -> Path:
         input_names=["audio"],
         output_names=["logmel"],
         dynamic_shapes={"audio": {1: Dim("samples")}},
+        external_data=False,
         verbose=False,
     )
     return path

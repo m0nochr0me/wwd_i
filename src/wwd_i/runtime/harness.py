@@ -26,9 +26,9 @@ class StreamStats:
         return self.compute_ms / self.audio_ms if self.audio_ms else 0.0
 
 
-def load_session(path: str | Path) -> ort.InferenceSession:
+def load_session(path: str | Path, sess_options: ort.SessionOptions | None = None) -> ort.InferenceSession:
     """Load an ONNX model on the CPU execution provider."""
-    return ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    return ort.InferenceSession(str(path), sess_options=sess_options, providers=["CPUExecutionProvider"])
 
 
 def run_stream(
