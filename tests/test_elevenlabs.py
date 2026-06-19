@@ -76,3 +76,42 @@ def test_generate_clips_writes_and_caches(tmp_path):
 
     again = generate_clips("hey computer", tmp_path, n_clips=8, client=client, synthesize=fake_synth, seed=0)
     assert again == paths and len(calls) == 8  # all cached -> no new synthesis
+
+
+class _ApiError(Exception):
+    """Mimics elevenlabs ApiError: carries status_code + body, duck-typed by the module."""
+
+    def __init__(self, status_code, message):
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = {"detail": {"message": message, "status": "voice_not_fine_tuned"}}
+
+
+def test_generate_clips_skips_unusable_voice(tmp_path):
+    bad = "v3"
+    calls = []
+
+    def fake_synth(client, text, voice_id, *, model, stability, style, similarity):
+        calls.append(voice_id)
+        if voice_id == bad:
+            raise _ApiError(400, f"Voice '{voice_id}' is not fine-tuned and cannot be used.")
+        return _sine_pcm()
+
+    client = _FakeClient([f"v{i}" for i in range(5)])
+    # n_clips == full grid (5 voices x 3 x 3 x 3 = 135) -> every voice is drawn, so the bad one is hit.
+    paths = generate_clips("hey computer", tmp_path, n_clips=135, client=client, synthesize=fake_synth, seed=0)
+    assert calls.count(bad) == 1  # attempted once, then blacklisted for the rest of the batch
+    assert len(paths) == 4 * 27  # only the 4 good voices x 27 setting combos were written
+
+
+def test_generate_clips_reraises_non_voice_error(tmp_path):
+    def fake_synth(client, text, voice_id, *, model, stability, style, similarity):
+        raise _ApiError(401, "invalid api key")  # auth error -> must not be swallowed
+
+    client = _FakeClient([f"v{i}" for i in range(3)])
+    try:
+        generate_clips("hey computer", tmp_path, n_clips=5, client=client, synthesize=fake_synth, seed=0)
+    except _ApiError as e:
+        assert e.status_code == 401
+    else:
+        raise AssertionError("expected the 401 to propagate")

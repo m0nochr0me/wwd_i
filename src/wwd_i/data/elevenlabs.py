@@ -84,6 +84,24 @@ def _synthesize(
     return b"".join(audio)  # the SDK streams byte chunks
 
 
+def _is_unusable_voice(exc: Exception) -> bool:
+    """True for a per-voice 400 from convert (e.g. a clone that's 'not fine-tuned').
+
+    Such a voice can't be synthesized at all, so the caller skips it. Everything else
+    (auth, quota, rate-limit, server, network) isn't voice-specific and should halt the
+    run, so the caller re-raises. Duck-typed on ``status_code`` to avoid importing the SDK.
+    """
+    return getattr(exc, "status_code", None) == 400
+
+
+def _error_message(exc: Exception) -> str:
+    body = getattr(exc, "body", None)
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, dict) and detail.get("message"):
+        return str(detail["message"])
+    return str(exc)
+
+
 def _pcm16_to_float(pcm: bytes) -> np.ndarray:
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
 
@@ -122,6 +140,10 @@ def generate_clips(
     Cached by (phrase, voice, settings): existing files are reused, so reruns and
     a bumped ``n_clips`` only synthesize the new variants. ``client`` /
     ``synthesize`` are injectable seams (default to the real SDK).
+
+    A voice the API rejects (a per-voice 400, e.g. a clone that isn't fine-tuned) is
+    skipped for the rest of the batch, so the returned count may be < ``n_clips``. Other
+    failures (auth, quota, rate-limit, network) are not voice-specific and propagate.
     """
     client = client or _client()
     out_dir = Path(out_dir)
@@ -131,15 +153,25 @@ def generate_clips(
         raise RuntimeError("no voices available on this ElevenLabs account")
 
     written: list[Path] = []
+    skipped: set[str] = set()
     for voice_id, stability, style, similarity in _variants(n_clips, voice_ids, seed):
+        if voice_id in skipped:
+            continue
         tag = hashlib.blake2b(
             f"{phrase}|{voice_id}|{stability}|{style}|{similarity}".encode(), digest_size=8
         ).hexdigest()
         path = out_dir / f"{tag}.wav"
         if not path.exists():
-            pcm = synthesize(
-                client, phrase, voice_id, model=model, stability=stability, style=style, similarity=similarity
-            )
+            try:
+                pcm = synthesize(
+                    client, phrase, voice_id, model=model, stability=stability, style=style, similarity=similarity
+                )
+            except Exception as exc:  # noqa: BLE001 - re-raised below unless it's a skippable per-voice 400
+                if not _is_unusable_voice(exc):
+                    raise
+                skipped.add(voice_id)
+                print(f"skip voice {voice_id}: {_error_message(exc)}")
+                continue
             sf.write(path, _rms_normalize(_pcm16_to_float(pcm)), SAMPLE_RATE)
         if path not in written:
             written.append(path)
