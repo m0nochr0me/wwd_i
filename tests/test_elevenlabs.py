@@ -2,7 +2,13 @@ import numpy as np
 import soundfile as sf
 
 from wwd_i.config import SAMPLE_RATE
-from wwd_i.data.elevenlabs import _pcm16_to_float, _rms_normalize, _variants, generate_clips
+from wwd_i.data.elevenlabs import (
+    _balanced_voice_ids,
+    _pcm16_to_float,
+    _rms_normalize,
+    _variants,
+    generate_clips,
+)
 
 
 class _FakeClient:
@@ -36,11 +42,29 @@ def test_variants_deterministic_and_count():
     assert _variants(20, ids, seed=1) != _variants(20, ids, seed=0)
 
 
+class _LabeledVoice:
+    def __init__(self, vid, gender, age, accent):
+        self.voice_id = vid
+        self.labels = {"gender": gender, "age": age, "accent": accent}
+
+
+def test_balanced_voice_ids_even_spread():
+    # 3 male voices vs 9 female: round-robin across the two demographic buckets
+    # should pull 3 of each for 6 picks, not just the 6 most-numerous (all female).
+    voices = [_LabeledVoice(f"m{i}", "male", "young", "american") for i in range(3)]
+    voices += [_LabeledVoice(f"f{i}", "female", "young", "british") for i in range(9)]
+    sel = _balanced_voice_ids(voices, max_voices=6, seed=0)
+    assert len(sel) == 6
+    assert sum(s.startswith("m") for s in sel) == 3  # males not starved by the larger bucket
+    assert _balanced_voice_ids(voices, 6, seed=0) == sel  # deterministic
+    assert set(_balanced_voice_ids(voices, 99, seed=0)) == {v.voice_id for v in voices}  # caps at available
+
+
 def test_generate_clips_writes_and_caches(tmp_path):
     calls = []
 
-    def fake_synth(client, text, voice_id, *, model, stability, style):
-        calls.append((text, voice_id, stability, style))
+    def fake_synth(client, text, voice_id, *, model, stability, style, similarity):
+        calls.append((text, voice_id, stability, style, similarity))
         return _sine_pcm()
 
     client = _FakeClient([f"v{i}" for i in range(10)])

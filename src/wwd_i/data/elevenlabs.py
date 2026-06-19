@@ -1,8 +1,9 @@
 """ElevenLabs v3 TTS sample generation (Phase 3).
 
-Synthesizes diverse spoken renderings of a phrase — many voices crossed with a
-few prosody settings — and caches them as 16 kHz mono wavs, RMS-normalized.
-Used for both positives (the wake phrase) and hard negatives (near phrases).
+Synthesizes diverse spoken renderings of a phrase — voices balanced across
+gender/age/accent, crossed with stability/style/similarity settings — and caches
+them as 16 kHz mono wavs, RMS-normalized. Used for both positives (the wake
+phrase) and hard negatives (near phrases).
 
 The API key is read from ``ELEVENLABS_API_KEY``; nothing secret is stored in
 code. ``elevenlabs`` is a generation-only dep (the ``train`` group), imported
@@ -26,6 +27,7 @@ DEFAULT_MODEL = "eleven_v3"
 PCM_FORMAT = "pcm_16000"  # raw s16le mono @ 16 kHz — no resample needed
 STABILITIES = (0.0, 0.5, 1.0)  # eleven_v3 only accepts discrete stability: Creative / Natural / Robust
 STYLES = (0.0, 0.3, 0.6)
+SIMILARITIES = (0.3, 0.6, 0.9)  # adherence to the source voice — low/mid/high gives extra timbral spread
 
 
 def _client():  # pragma: no cover - thin SDK seam
@@ -37,12 +39,38 @@ def _client():  # pragma: no cover - thin SDK seam
     return ElevenLabs(api_key=key)
 
 
-def _list_voice_ids(client, max_voices: int) -> list[str]:
-    return [v.voice_id for v in client.voices.get_all().voices][:max_voices]
+def _balanced_voice_ids(voices, max_voices: int, seed: int) -> list[str]:
+    """Pick up to ``max_voices`` voice ids spread evenly across (gender, age, accent).
+
+    Premade voices carry a ``labels`` dict; we bucket by demographic and round-robin
+    across buckets so the selection isn't dominated by whichever group is most numerous
+    (the old "first N" took whatever order the API returned). Voices without labels fall
+    into one bucket. Deterministic in ``seed``.
+    """
+    rng = np.random.default_rng(seed)
+    buckets: dict[tuple, list[str]] = {}
+    for v in voices:
+        labels = getattr(v, "labels", None) or {}
+        key = (labels.get("gender"), labels.get("age"), labels.get("accent"))
+        buckets.setdefault(key, []).append(v.voice_id)
+
+    keys = list(buckets)
+    rng.shuffle(keys)
+    for k in keys:
+        rng.shuffle(buckets[k])
+
+    selected: list[str] = []
+    i = 0
+    while len(selected) < max_voices and any(buckets.values()):
+        bucket = buckets[keys[i % len(keys)]]
+        if bucket:
+            selected.append(bucket.pop())
+        i += 1
+    return selected
 
 
 def _synthesize(
-    client, text: str, voice_id: str, *, model: str, stability: float, style: float
+    client, text: str, voice_id: str, *, model: str, stability: float, style: float, similarity: float
 ) -> bytes:  # pragma: no cover - thin SDK seam
     from elevenlabs import VoiceSettings
 
@@ -51,7 +79,7 @@ def _synthesize(
         text=text,
         model_id=model,
         output_format=PCM_FORMAT,
-        voice_settings=VoiceSettings(stability=stability, similarity_boost=0.75, style=style),
+        voice_settings=VoiceSettings(stability=stability, similarity_boost=similarity, style=style),
     )
     return b"".join(audio)  # the SDK streams byte chunks
 
@@ -71,9 +99,9 @@ def _rms_normalize(x: np.ndarray, target_dbfs: float = -20.0) -> np.ndarray:
     return y.astype(np.float32)
 
 
-def _variants(n_clips: int, voice_ids: list[str], seed: int) -> list[tuple[str, float, float]]:
-    """Spread ``n_clips`` over a shuffled voice × stability × style grid."""
-    grid = [(v, st, sy) for v in voice_ids for st in STABILITIES for sy in STYLES]
+def _variants(n_clips: int, voice_ids: list[str], seed: int) -> list[tuple[str, float, float, float]]:
+    """Spread ``n_clips`` over a shuffled voice × stability × style × similarity grid."""
+    grid = [(v, st, sy, si) for v in voice_ids for st in STABILITIES for sy in STYLES for si in SIMILARITIES]
     np.random.default_rng(seed).shuffle(grid)
     return [grid[i % len(grid)] for i in range(n_clips)]
 
@@ -98,16 +126,20 @@ def generate_clips(
     client = client or _client()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    voice_ids = _list_voice_ids(client, max_voices)
+    voice_ids = _balanced_voice_ids(client.voices.get_all().voices, max_voices, seed)
     if not voice_ids:
         raise RuntimeError("no voices available on this ElevenLabs account")
 
     written: list[Path] = []
-    for voice_id, stability, style in _variants(n_clips, voice_ids, seed):
-        tag = hashlib.blake2b(f"{phrase}|{voice_id}|{stability}|{style}".encode(), digest_size=8).hexdigest()
+    for voice_id, stability, style, similarity in _variants(n_clips, voice_ids, seed):
+        tag = hashlib.blake2b(
+            f"{phrase}|{voice_id}|{stability}|{style}|{similarity}".encode(), digest_size=8
+        ).hexdigest()
         path = out_dir / f"{tag}.wav"
         if not path.exists():
-            pcm = synthesize(client, phrase, voice_id, model=model, stability=stability, style=style)
+            pcm = synthesize(
+                client, phrase, voice_id, model=model, stability=stability, style=style, similarity=similarity
+            )
             sf.write(path, _rms_normalize(_pcm16_to_float(pcm)), SAMPLE_RATE)
         if path not in written:
             written.append(path)
