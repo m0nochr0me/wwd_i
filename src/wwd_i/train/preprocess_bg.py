@@ -20,14 +20,13 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-import onnxruntime as ort
 import soundfile as sf
 
 from wwd_i.audio.io import load_wav
 from wwd_i.config import SAMPLE_RATE
 from wwd_i.data.backgrounds import _quiet_stderr, find_audio
 from wwd_i.data.clips import fixed_length
-from wwd_i.train.train_head import CLIP_SECONDS, _default_backbone, embed_clips
+from wwd_i.train.train_head import CLIP_SECONDS, _default_backbone, _make_session, embed_clips
 
 
 def _crops(wav: np.ndarray, n: int, length: int, rng: np.random.Generator) -> list[np.ndarray]:
@@ -52,7 +51,7 @@ def preprocess(args: argparse.Namespace) -> np.ndarray:
     rng = np.random.default_rng(args.seed)
     rng.shuffle(paths)
 
-    session = ort.InferenceSession(args.backbone, providers=["CPUExecutionProvider"])
+    session = _make_session(args.backbone)
     length = int(CLIP_SECONDS * SAMPLE_RATE)
     min_len = int(args.min_seconds * SAMPLE_RATE)
 

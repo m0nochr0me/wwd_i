@@ -38,6 +38,22 @@ def _default_backbone() -> str:
     return str(files("wwd_i.models") / "backbone.onnx")
 
 
+def _make_session(backbone: str) -> ort.InferenceSession:
+    """ORT session for the frozen backbone, on CUDA when available else CPU.
+
+    The heavy embedding work (``preprocess_bg`` and the positives/hard-negs here)
+    runs on the GPU when a Colab GPU runtime has the ``onnxruntime-gpu`` wheel
+    (the notebook installs it when a GPU is present); otherwise it falls back to
+    CPU. The active providers are printed so a silent CPU fallback is visible. The
+    shipped runtime (``runtime/harness.py``) intentionally stays CPU-only.
+    """
+    cuda = "CUDAExecutionProvider" in ort.get_available_providers()
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if cuda else ["CPUExecutionProvider"]
+    session = ort.InferenceSession(backbone, providers=providers)
+    print(f"backbone ORT providers: {session.get_providers()}", flush=True)
+    return session
+
+
 def _windows(mel: np.ndarray) -> np.ndarray:
     """log-mel ``[T, n_mels]`` -> stacked backbone inputs ``[W, WINDOW, n_mels]``."""
     hop = MEL_FRAMES_PER_FRAME
@@ -173,23 +189,24 @@ def train(args: argparse.Namespace) -> None:
     pool = load_background_pool(args.background, max_clips=args.max_bg, seed=args.seed) if args.background else []
     aug = Augmenter(pool, seed=args.seed)
 
-    session = ort.InferenceSession(args.backbone, providers=["CPUExecutionProvider"])
+    session = _make_session(args.backbone)
     x_np, y_np = build_embeddings(args, aug, session)
-    x = torch.from_numpy(x_np).float()
-    y = torch.from_numpy(y_np)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    x = torch.from_numpy(x_np).float().to(device)
+    y = torch.from_numpy(y_np).to(device)
 
     # train / val (checkpoint selection) / test (honest calibration + gate)
     idx = np.random.default_rng(args.seed).permutation(len(x))
     n_hold = max(2, int(0.15 * len(x)))
     test, val, tr = idx[:n_hold], idx[n_hold : 2 * n_hold], idx[2 * n_hold :]
 
-    head = WakeHead(HeadConfig(hidden=args.hidden, dropout=args.dropout))
+    head = WakeHead(HeadConfig(hidden=args.hidden, dropout=args.dropout)).to(device)
     _fit(head, x, y, tr, val, args)
 
     head.eval()
     with torch.no_grad():
-        test_prob = torch.sigmoid(head.clip_logits(x[test])).numpy()
-    result = calibrate(test_prob, y[test].numpy(), target_fa=args.target_fa, target_fr=args.target_fr)
+        test_prob = torch.sigmoid(head.clip_logits(x[test])).cpu().numpy()
+    result = calibrate(test_prob, y[test].cpu().numpy(), target_fa=args.target_fa, target_fr=args.target_fr)
 
     c = result["chosen"]
     print(f"\nDET (held-out test, {result['neg_hours']:.2f} h negatives):")
