@@ -15,9 +15,18 @@ import copy
 import json
 from pathlib import Path
 
+# isort: off
 import numpy as np
-import onnxruntime as ort
+
+# torch must be imported before onnxruntime: importing torch loads the CUDA runtime and
+# cuDNN libraries the onnxruntime-gpu wheel links against (they ship inside torch's
+# nvidia-* dependencies), so `import onnxruntime` resolves on a GPU runtime instead of
+# failing with `ImportError: libcudart.so.<N>`. See the ORT CUDA-EP docs (import torch /
+# preload_dlls). `# isort: off/on` stops ruff from re-alphabetising past this order.
 import torch
+import onnxruntime as ort
+
+# isort: on
 
 from wwd_i.audio.io import load_wav
 from wwd_i.config import MEL_FRAMES_PER_FRAME, SAMPLE_RATE
