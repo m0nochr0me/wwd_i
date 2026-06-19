@@ -84,22 +84,27 @@ def _synthesize(
     return b"".join(audio)  # the SDK streams byte chunks
 
 
-def _is_unusable_voice(exc: Exception) -> bool:
-    """True for a per-voice 400 from convert (e.g. a clone that's 'not fine-tuned').
+def _error_detail(exc: Exception) -> dict:
+    """The API error's ``body['detail']`` dict, or ``{}`` — duck-typed to avoid the SDK."""
+    body = getattr(exc, "body", None)
+    detail = body.get("detail") if isinstance(body, dict) else None
+    return detail if isinstance(detail, dict) else {}
 
-    Such a voice can't be synthesized at all, so the caller skips it. Everything else
-    (auth, quota, rate-limit, server, network) isn't voice-specific and should halt the
-    run, so the caller re-raises. Duck-typed on ``status_code`` to avoid importing the SDK.
+
+def _is_unusable_voice(exc: Exception) -> bool:
+    """True when the API rejects a *specific* voice — so the caller skips just that voice.
+
+    Covers e.g. ``voice_not_fine_tuned`` (400) and ``voice_disabled`` (403, owner-disabled).
+    Keyed on the machine-readable ``detail.status`` (``voice_*``), the reliable per-voice
+    signal across status codes. Account-wide failures (auth, quota, rate-limit, server,
+    network) carry a non-``voice_*`` status (or no body) and propagate so the run halts.
     """
-    return getattr(exc, "status_code", None) == 400
+    status = _error_detail(exc).get("status")
+    return isinstance(status, str) and status.startswith("voice_")
 
 
 def _error_message(exc: Exception) -> str:
-    body = getattr(exc, "body", None)
-    detail = body.get("detail") if isinstance(body, dict) else None
-    if isinstance(detail, dict) and detail.get("message"):
-        return str(detail["message"])
-    return str(exc)
+    return _error_detail(exc).get("message") or str(exc)
 
 
 def _pcm16_to_float(pcm: bytes) -> np.ndarray:
@@ -141,9 +146,9 @@ def generate_clips(
     a bumped ``n_clips`` only synthesize the new variants. ``client`` /
     ``synthesize`` are injectable seams (default to the real SDK).
 
-    A voice the API rejects (a per-voice 400, e.g. a clone that isn't fine-tuned) is
-    skipped for the rest of the batch, so the returned count may be < ``n_clips``. Other
-    failures (auth, quota, rate-limit, network) are not voice-specific and propagate.
+    A voice the API rejects (not fine-tuned, or disabled by its owner) is skipped for the
+    rest of the batch, so the returned count may be < ``n_clips``. Other failures (auth,
+    quota, rate-limit, network) are not voice-specific and propagate.
     """
     client = client or _client()
     out_dir = Path(out_dir)

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import soundfile as sf
 
 from wwd_i.config import SAMPLE_RATE
@@ -81,20 +82,27 @@ def test_generate_clips_writes_and_caches(tmp_path):
 class _ApiError(Exception):
     """Mimics elevenlabs ApiError: carries status_code + body, duck-typed by the module."""
 
-    def __init__(self, status_code, message):
+    def __init__(self, status_code, message, *, status):
         super().__init__(message)
         self.status_code = status_code
-        self.body = {"detail": {"message": message, "status": "voice_not_fine_tuned"}}
+        self.body = {"detail": {"message": message, "status": status}}
 
 
-def test_generate_clips_skips_unusable_voice(tmp_path):
+@pytest.mark.parametrize(
+    "status_code, status, message",
+    [
+        (400, "voice_not_fine_tuned", "Voice 'v3' is not fine-tuned and cannot be used."),
+        (403, "voice_disabled", "Voice 'v3' has been disabled by the owner."),
+    ],
+)
+def test_generate_clips_skips_unusable_voice(tmp_path, status_code, status, message):
     bad = "v3"
     calls = []
 
     def fake_synth(client, text, voice_id, *, model, stability, style, similarity):
         calls.append(voice_id)
         if voice_id == bad:
-            raise _ApiError(400, f"Voice '{voice_id}' is not fine-tuned and cannot be used.")
+            raise _ApiError(status_code, message, status=status)
         return _sine_pcm()
 
     client = _FakeClient([f"v{i}" for i in range(5)])
@@ -106,7 +114,8 @@ def test_generate_clips_skips_unusable_voice(tmp_path):
 
 def test_generate_clips_reraises_non_voice_error(tmp_path):
     def fake_synth(client, text, voice_id, *, model, stability, style, similarity):
-        raise _ApiError(401, "invalid api key")  # auth error -> must not be swallowed
+        # account-wide auth error (non-voice status) -> must not be swallowed
+        raise _ApiError(401, "invalid api key", status="invalid_api_key")
 
     client = _FakeClient([f"v{i}" for i in range(3)])
     try:
