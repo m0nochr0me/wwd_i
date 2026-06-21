@@ -128,6 +128,33 @@ def test_probe_machinery_on_held_out():
     assert res["backbone"] > 0.6  # 4-way held-out, chance 0.25
 
 
+def test_export_rejects_non_invariant(tmp_path):
+    """A *trained* backbone without per-window normalization is loudness-sensitive (its BN
+    stats encode the training loudness), so the export guardrail rejects it. An untrained
+    net can't show this — at init it collapses all inputs to ~one direction."""
+    torch.manual_seed(0)
+    mel = MelSpectrogram().eval()
+
+    class _Unnorm(Backbone):  # Backbone.forward minus the _normalize_window call (pre-norm code)
+        def forward(self, mel):  # arg name must stay "mel" to match export_onnx dynamic_shapes
+            x = self.blocks(self.stem(mel.transpose(1, 2).unsqueeze(1)))
+            return torch.nn.functional.normalize(self.proj(x.mean(dim=(2, 3))), dim=1)
+
+    model = _Unnorm(TINY)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    sampler = EpisodicSampler(_index(TRAIN_WORDS), _load, seed=0)
+    for _ in range(120):
+        model.train()
+        loss, _ = prototypical_loss(model(mel(sampler.episode(4, 3, 3))), 4, 3, 3)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+    model.eval()
+    with pytest.raises(RuntimeError, match="loudness-invariant"):
+        export_onnx(model, tmp_path / "bad.onnx")
+
+
 def test_loudness_invariance():
     """Per-window normalization makes the embedding invariant to input gain.
 

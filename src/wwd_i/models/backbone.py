@@ -143,6 +143,31 @@ class Backbone(nn.Module):
         return F.normalize(x, dim=1)
 
 
+def _assert_loudness_invariant(path: str | Path, n_mels: int) -> None:
+    """Fail the export if per-window normalization is missing from the graph.
+
+    A pure loudness change is an additive constant in log-mel, so a normalized
+    backbone is invariant to it (cosine ≈ 1). This catches the silent failure of
+    exporting pre-normalization code, which ships a loudness-sensitive backbone and
+    quietly breaks every head and bg cache trained against it.
+    """
+    import numpy as np
+    import onnxruntime as ort
+
+    sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    name = sess.get_inputs()[0].name
+    mel = np.random.default_rng(0).standard_normal((2, 76, n_mels)).astype(np.float32)
+    base = sess.run(None, {name: mel})[0]
+    loud = sess.run(None, {name: (mel + 4.605).astype(np.float32)})[0]  # +20 dB == +ln(100)/bin
+    cos = (base * loud).sum(1) / (np.linalg.norm(base, axis=1) * np.linalg.norm(loud, axis=1))
+    if not (cos > 0.999).all():
+        raise RuntimeError(
+            f"exported backbone is not loudness-invariant (cosine {float(cos.min()):.3f} under +20 dB): "
+            "per-window normalization (_normalize_window) is missing from the graph — "
+            "you are exporting pre-normalization code"
+        )
+
+
 def export_onnx(model: Backbone, path: str | Path, *, n_frames: int = 76) -> Path:
     """Export a (frozen) backbone to ONNX with a dynamic time axis.
 
@@ -176,4 +201,5 @@ def export_onnx(model: Backbone, path: str | Path, *, n_frames: int = 76) -> Pat
         external_data=False,
         verbose=False,
     )
+    _assert_loudness_invariant(path, model.config.n_mels)
     return path
