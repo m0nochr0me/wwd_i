@@ -29,6 +29,7 @@ def _run_detect(args: argparse.Namespace) -> int:
         calibration=args.calibration,
         threshold=args.threshold,
         refractory_s=args.refractory,
+        normalize=not args.no_normalize,
     )
     frames = mic_frames() if args.mic else file_frames(args.source)
     print(
@@ -96,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--calibration", type=Path, help="head calibration json (default: <head>.json)")
     parser.add_argument("--threshold", type=float, help="override the calibrated detection threshold")
     parser.add_argument("--refractory", type=float, help="override the debounce window (seconds)")
+    parser.add_argument(
+        "--no-normalize", action="store_true", help="disable input loudness normalization (AGC) — for A/B debugging"
+    )
     args = parser.parse_args(argv)
 
     if args.mic == bool(args.source):

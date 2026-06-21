@@ -93,8 +93,26 @@ class BCResBlock(nn.Module):
         return out
 
 
+def _normalize_window(mel: Tensor) -> Tensor:
+    """Per-window z-score over (time, mel) — makes the embedding loudness-invariant.
+
+    A constant audio-gain factor ``a`` scales power by ``a²``, i.e. adds a uniform
+    ``2·ln a`` to every log-mel bin; subtracting the per-window mean removes that
+    offset exactly, and dividing by the std normalizes contrast. ``eps`` keeps a
+    silent window (std≈0) finite — it maps to ~0 instead of blowing up.
+    """
+    centered = mel - mel.mean(dim=(1, 2), keepdim=True)
+    std = centered.pow(2).mean(dim=(1, 2), keepdim=True).sqrt()
+    return centered / (std + 1e-5)
+
+
 class Backbone(nn.Module):
-    """Log-mel ``[B, T, n_mels]`` -> L2-normalized embedding ``[B, D]``."""
+    """Log-mel ``[B, T, n_mels]`` -> L2-normalized embedding ``[B, D]``.
+
+    The log-mel input is per-window z-score normalized (``_normalize_window``) so the
+    embedding is invariant to input loudness; this is baked into ``forward`` so the
+    exported ONNX carries it to head training and the runtime unchanged.
+    """
 
     def __init__(self, config: BackboneConfig | None = None) -> None:
         super().__init__()
@@ -116,6 +134,7 @@ class Backbone(nn.Module):
         self.proj = nn.Linear(in_ch, c.embedding_dim)
 
     def forward(self, mel: Tensor) -> Tensor:
+        mel = _normalize_window(mel)  # per-window z-score: loudness-invariant input
         x = mel.transpose(1, 2).unsqueeze(1)  # [B, T, n_mels] -> [B, 1, n_mels, T]
         x = self.stem(x)
         x = self.blocks(x)  # [B, C, 1, T]

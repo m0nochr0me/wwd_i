@@ -77,7 +77,7 @@ runtime agree exactly.
 | `hop_length` | 160 (10 ms) | → 100 mel frames/s, 8 per 80 ms hop |
 | `n_mels` | 32 | footprint vs detail; matches OWW, room to try 40 |
 | `fmin / fmax` | 0 / 8000 | full 16 kHz band |
-| compression | `log(mel + ε)` | ε≈1e-6; per-bin mean/var norm baked into backbone |
+| compression | `log(mel + ε)` | ε≈1e-6; per-window z-score (mean/var) norm baked into backbone |
 
 - **Single definition, two implementations**: a reference PyTorch/`torchaudio`
   version used in training, and the **exported ONNX** version used at inference.

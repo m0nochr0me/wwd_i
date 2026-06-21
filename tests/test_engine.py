@@ -96,6 +96,48 @@ def test_streaming_matches_batch(tmp_path):
     assert diff < 1e-4, f"seam/state mismatch: {diff}"  # GRU state carried identically across chunk boundaries
 
 
+def test_streaming_matches_batch_with_agc(tmp_path):
+    """Parity must hold when the AGC is actually doing work: a quiet signal forces a
+    real (capped) gain, so this catches a tail-carried-across-chunks normalizer bug
+    that the near-unity-gain signal above would not."""
+    sig = _noise(60, seed=3) * 0.02  # ~ -54 dBFS -> AGC applies a large gain
+
+    batch = _engine(tmp_path, threshold=-1.0, refractory=0.0).push(sig)
+
+    eng = _engine(tmp_path, threshold=-1.0, refractory=0.0)
+    stream = [d for i in range(60) for d in eng.push(sig[i * FRAME_SAMPLES : (i + 1) * FRAME_SAMPLES])]
+
+    assert len(batch) == len(stream) > 0
+    diff = np.max(np.abs([d.score for d in batch] - np.array([d.score for d in stream])))
+    assert diff < 1e-4, f"AGC seam/state mismatch: {diff}"
+
+
+def test_rms_normalizer_gain_invariant_and_chunk_safe():
+    """The AGC core: pulls audio to the training level, is invariant to input gain
+    (so a quiet mic and the -20 dBFS training clips reach the backbone alike), and is
+    chunk-independent (the property that keeps streamed==batch with the AGC on)."""
+    from wwd_i.runtime.engine import AGC_TARGET_RMS, _RmsNormalizer
+
+    win = int(1.5 * SAMPLE_RATE)
+    sig = (np.random.default_rng(1).standard_normal(2 * win) * 0.1).astype(np.float32)  # -20 dBFS, > window
+
+    warm = _RmsNormalizer(win)(sig)[win:]  # past the rolling-window warm-up
+    assert abs(float(np.sqrt(np.mean(warm.astype(np.float64) ** 2))) - AGC_TARGET_RMS) < 0.02
+
+    # same audio 20 dB quieter -> the same normalized samples (gain-invariant once warmed)
+    loud, quiet = _RmsNormalizer(win)(sig), _RmsNormalizer(win)((sig * 0.1).astype(np.float32))
+    assert np.max(np.abs(loud[win:] - quiet[win:])) < 1e-3
+
+    # one block == many odd-sized pushes, sample for sample (parity safety)
+    norm = _RmsNormalizer(win)
+    streamed = np.concatenate([norm(sig[i : i + 137]) for i in range(0, len(sig), 137)])
+    assert np.max(np.abs(_RmsNormalizer(win)(sig) - streamed)) < 1e-5
+
+    # near-silence is not amplified to speech level (gain is capped)
+    faint = np.full(SAMPLE_RATE, 1e-4, dtype=np.float32)
+    assert float(np.max(np.abs(_RmsNormalizer(win, max_gain=20.0)(faint)))) <= 1e-4 * 20.0 + 1e-9
+
+
 def test_refractory_spacing(tmp_path):
     """Above-threshold hops are debounced to at most one detection per refractory window."""
     eng = _engine(tmp_path, threshold=0.5, refractory=1.0)

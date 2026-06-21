@@ -4,7 +4,7 @@ Implemented as a fixed 1-D convolution (a windowed DFT basis) followed by a mel
 filterbank matmul and a log. Because it is just conv + matmul + elementwise ops,
 the PyTorch module and its exported ONNX twin compute identical values — which is
 what the Phase 1 parity gate checks. No normalization is applied here; the
-backbone owns per-bin normalization. See docs/architecture.md §4.
+backbone owns per-window normalization. See docs/architecture.md §4.
 
 torch/torchaudio are training/export-only deps (the `train` group); the inference
 runtime uses the exported ONNX model and never imports this module.

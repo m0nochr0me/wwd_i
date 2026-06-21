@@ -34,6 +34,45 @@ from wwd_i.runtime.harness import load_session
 # which defines the window the head was trained on; tests/test_engine.py asserts it.
 WINDOW = 76
 
+# Loudness normalization (AGC). The frozen backbone is strongly loudness-sensitive
+# — a -12 dB input level drop already halves the embedding's cosine similarity, and
+# heads are trained/calibrated on -20 dBFS audio (data.elevenlabs._rms_normalize) — so
+# raw, quiet mic input lands off the trained manifold and the head's output is arbitrary.
+# This pulls the input back toward the training level before the mel front-end.
+AGC_TARGET_RMS = 0.1  # -20 dBFS, matches the head-training normalization target
+AGC_WINDOW_S = 1.5  # rolling-RMS span, matches train.train_head.CLIP_SECONDS
+AGC_MAX_GAIN = 20.0  # +26 dB cap: don't amplify silence/room tone up to speech level
+
+
+class _RmsNormalizer:
+    """Causal moving-RMS automatic gain control toward ``AGC_TARGET_RMS``.
+
+    The gain applied to each sample is a function only of the trailing ``window``
+    samples on the absolute audio timeline, so it is identical whether audio
+    arrives in one block or as a stream of frames — preserving the streamed==batch
+    parity gate. Gain is capped at ``max_gain`` so near-silence is not blown up to
+    speech level (which would re-introduce false fires).
+    """
+
+    def __init__(self, window: int, target: float = AGC_TARGET_RMS, max_gain: float = AGC_MAX_GAIN) -> None:
+        self._win = max(1, window)
+        self._target = target
+        self._max_gain = max_gain
+        self._tail = np.zeros(0, dtype=np.float64)  # trailing squared samples (≤ window-1) carried across pushes
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        if x.size == 0:
+            return x.astype(np.float32)
+        sq = x.astype(np.float64) ** 2
+        buf = np.concatenate([self._tail, sq])
+        prefix = np.concatenate([[0.0], np.cumsum(buf)])  # prefix[k] = sum(buf[:k])
+        hi = np.arange(self._tail.size + 1, self._tail.size + 1 + x.size)  # window end (exclusive prefix index)
+        lo = np.maximum(0, hi - self._win)
+        rms = np.sqrt((prefix[hi] - prefix[lo]) / (hi - lo))
+        gain = np.minimum(self._target / np.maximum(rms, 1e-9), self._max_gain)
+        self._tail = buf[-(self._win - 1) :] if self._win > 1 else buf[:0]
+        return (x.astype(np.float64) * gain).astype(np.float32)
+
 
 def _low_cpu_options() -> ort.SessionOptions:
     """Session options for the always-on detector: single-threaded, no spinning.
@@ -84,6 +123,7 @@ class WakeWordEngine:
         mel_path: str | Path = "",
         threshold: float | None = None,
         refractory_s: float | None = None,
+        normalize: bool = True,
     ) -> None:
         head_path = Path(head_path)
         meta = self._load_calibration(head_path, calibration)
@@ -107,6 +147,7 @@ class WakeWordEngine:
         self._emb_in, self._h_in = (i.name for i in self._head.get_inputs())
         self._prob_out, self._hn_out = (o.name for o in self._head.get_outputs())
         self._hidden = int(self._head.get_inputs()[1].shape[-1])
+        self._normalize = normalize
 
         self.reset()
 
@@ -122,6 +163,7 @@ class WakeWordEngine:
     def reset(self) -> None:
         """Clear all streaming state — buffers, GRU hidden state, timers."""
         self._mel = MelStreamer(self._mel_fn)
+        self._agc = _RmsNormalizer(int(AGC_WINDOW_S * SAMPLE_RATE)) if self._normalize else None
         self._mel_buf = np.zeros((0, self._n_mels()), dtype=np.float32)
         self._h = np.zeros((1, 1, self._hidden), dtype=np.float32)
         self._hop = 0
@@ -137,7 +179,10 @@ class WakeWordEngine:
 
     def push(self, samples: np.ndarray) -> list[Detection]:
         """Feed an audio chunk (any length, 16 kHz mono float32); return detections."""
-        new = self._mel.push(np.asarray(samples, dtype=np.float32))
+        samples = np.asarray(samples, dtype=np.float32)
+        if self._agc is not None:
+            samples = self._agc(samples)
+        new = self._mel.push(samples)
         if new.shape[0]:
             self._mel_buf = np.concatenate([self._mel_buf, new], axis=0)
 

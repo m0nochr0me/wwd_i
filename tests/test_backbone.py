@@ -126,3 +126,20 @@ def test_probe_machinery_on_held_out():
     # and is evaluated on Speech Commands, not on these easily-separable tones.)
     assert 0.0 <= res["baseline"] <= 1.0
     assert res["backbone"] > 0.6  # 4-way held-out, chance 0.25
+
+
+def test_loudness_invariance():
+    """Per-window normalization makes the embedding invariant to input gain.
+
+    Without it, a level drop collapses the embedding direction (measured: -12 dB ->
+    cosine 0.55); the >0.95 bar across ±25 dB is the documented loudness target.
+    """
+    mel = MelSpectrogram().eval()
+    model = Backbone(TINY).eval()
+    audio = torch.from_numpy(np.stack([_load("w0", i) for i in range(4)]))
+    with torch.no_grad():
+        base = model(mel(audio))
+        for db in (-25.0, -12.0, 12.0, 25.0):
+            emb = model(mel(audio * 10.0 ** (db / 20.0)))
+            cos = (base * emb).sum(dim=1)  # both rows are unit-norm
+            assert (cos > 0.95).all(), f"{db:+.0f} dB broke loudness invariance: {cos.tolist()}"
