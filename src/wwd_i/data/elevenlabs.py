@@ -187,6 +187,13 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Generate ElevenLabs v3 samples for a phrase (Phase 3).")
     p.add_argument("--phrase", help="text to synthesize, e.g. 'hey computer'")
     p.add_argument("--hard-negs-for", help="instead synthesize the hard-negative near-phrases for this wake phrase")
+    p.add_argument(
+        "--llm-confusables",
+        type=int,
+        default=0,
+        metavar="N",
+        help="with --hard-negs-for: also fetch N acoustic confusables from Gemini (needs GEMINI_API_KEY)",
+    )
     p.add_argument("--out", required=True, help="output dir for the cached wavs")
     p.add_argument("--n-clips", type=int, default=300)
     p.add_argument("--model", default=DEFAULT_MODEL)
@@ -201,7 +208,13 @@ def main() -> None:
     if args.hard_negs_for:
         from wwd_i.data.negatives import hard_negative_phrases
 
-        phrases = hard_negative_phrases(args.hard_negs_for)
+        extra: list[str] = []
+        if args.llm_confusables:
+            from wwd_i.data.confusables import generate_confusables
+
+            extra = generate_confusables(args.hard_negs_for, n=args.llm_confusables)
+            print(f"+{len(extra)} LLM confusables: {', '.join(extra)}")
+        phrases = hard_negative_phrases(args.hard_negs_for, extra)
         written = [c for ph in phrases for c in generate_clips(ph, args.out, n_clips=args.n_clips, **common)]
         print(f"wrote {len(written)} hard-negative clips across {len(phrases)} phrases under {args.out}")
         return

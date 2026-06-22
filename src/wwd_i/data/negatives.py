@@ -9,6 +9,8 @@ Two kinds, per docs/architecture.md §7:
   (speech/music/noise) from the background pool, labelled "not the wake word".
 """
 
+from collections.abc import Iterable
+
 import numpy as np
 
 from wwd_i.config import SAMPLE_RATE
@@ -29,15 +31,18 @@ GENERIC_CONFUSABLES = (
 )
 
 
-def hard_negative_phrases(wake_phrase: str) -> list[str]:
+def hard_negative_phrases(wake_phrase: str, extra: Iterable[str] = ()) -> list[str]:
     """Near-phrase texts to synthesize as hard negatives for ``wake_phrase``.
 
-    Its individual words (sub-phrases — a frequent false-trigger source) plus the
-    generic confusables, minus anything equal to the full wake phrase.
+    Its individual words (sub-phrases — a frequent false-trigger source), the
+    generic confusables, and any ``extra`` phrases (e.g. LLM-generated acoustic
+    confusables from :mod:`wwd_i.data.confusables`), minus anything equal to the
+    full wake phrase. ``extra`` is lower-cased and de-duplicated with the rest.
     """
     wake = wake_phrase.strip().lower()
     words = wake.split()
     candidates = set(GENERIC_CONFUSABLES)
+    candidates.update(s for e in extra if (s := e.strip().lower()))
     if len(words) > 1:
         candidates.update(words)  # each word alone
     candidates.discard(wake)

@@ -11,6 +11,13 @@ def test_hard_negatives_multiword():
     assert all(g in negs for g in GENERIC_CONFUSABLES)
 
 
+def test_hard_negatives_extra_confusables():
+    negs = hard_negative_phrases("Aliyah", extra=["Maria", "All Year", "aliyah", "  "])
+    assert "maria" in negs and "all year" in negs  # extra lower-cased and included
+    assert "aliyah" not in negs  # extra equal to the wake phrase dropped
+    assert all(g in negs for g in GENERIC_CONFUSABLES)  # generics still present
+
+
 def test_hard_negatives_singleword_no_subwords():
     negs = hard_negative_phrases("marvin")
     assert "marvin" not in negs

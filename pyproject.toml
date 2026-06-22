@@ -44,6 +44,7 @@ dev = [
 train = [
     "datasets>=2.20.0,<4.0.0",  # MSWC ships a loading script; datasets>=4 dropped script support
     "elevenlabs>=1.0",  # Phase-3 TTS sample generation (Colab-side; never shipped)
+    "google-genai>=1.0",  # Phase-3 acoustic confusables via Gemini (Colab-side; never shipped)
     "onnxscript>=0.7.0",
     "torch>=2.12.0",
     "torchaudio>=2.11.0",
