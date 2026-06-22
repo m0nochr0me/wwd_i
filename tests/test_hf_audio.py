@@ -49,13 +49,18 @@ def test_write_pool_decodes_raw_bytes_under_custom_key(tmp_path):
 
 
 def test_write_pool_auto_detects_audio_column(tmp_path):
-    # The real B4 failure: audio is under `flac` but the caller passed the default --audio-key audio.
+    # audio under `flac` with json alongside; default --audio-key audio must pick flac, not json.
     examples = [{"flac": _flac(1.0), "__key__": "a", "json": {"label": "cough"}}]
     kept, skipped = _write_pool(examples, tmp_path, n_clips=10, audio_key="audio", min_seconds=0.4, max_stream=0)
     assert (kept, skipped) == (1, 0)  # resolves to `flac` instead of crashing on KeyError: 'audio'
 
 
-def test_write_pool_raises_when_no_audio_column(tmp_path):
-    examples = [{"__key__": "a", "json": {"label": "cough"}}]
-    with pytest.raises(KeyError):  # genuinely no audio anywhere -> clear, key-listing error
-        _write_pool(examples, tmp_path, n_clips=1, audio_key="audio", min_seconds=0.4, max_stream=0)
+def test_write_pool_skips_metadata_only_examples(tmp_path):
+    # 0x3/vocal-bursts streams audio and JSON as SEPARATE, unpaired examples; metadata-only ones
+    # carry no audio and must be skipped (not crash, not selected as the audio column).
+    examples = [
+        {"json": {"label": "breath"}, "__key__": "a", "__url__": "Breath.tar.gz"},  # metadata-only
+        {"flac": _flac(1.0), "__key__": "b", "__url__": "Breath.tar.gz"},  # audio
+    ]
+    kept, skipped = _write_pool(examples, tmp_path, n_clips=10, audio_key="audio", min_seconds=0.4, max_stream=0)
+    assert (kept, skipped) == (1, 1)

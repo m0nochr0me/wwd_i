@@ -48,8 +48,10 @@ def _stream(dataset: str, config: str | None, split: str):
 
 
 # Audio column names vary by source: parquet Audio is named "audio"; a WebDataset names each
-# member by its file extension, so the audio is under "flac"/"wav"/... (e.g. 0x3/vocal-bursts
-# uses "flac"). --audio-key is a hint; the real column is auto-detected when it isn't present.
+# member by file extension ("flac"/"wav"/...). Some WebDatasets store audio and metadata
+# UNPAIRED — 0x3/vocal-bursts ("one .tar.gz per category") streams FLAC audio and the JSON
+# metadata as SEPARATE examples, so an example may hold audio, or only JSON, or neither.
+# --audio-key is a hint; the real column is auto-detected and audio-less examples are skipped.
 _AUDIO_KEY_HINTS = ("audio", "flac", "wav", "mp3", "ogg", "opus", "m4a", "aac", "wave")
 
 
@@ -58,24 +60,19 @@ def _is_audio_value(value) -> bool:
     return isinstance(value, (bytes, bytearray)) or (isinstance(value, dict) and ("bytes" in value or "path" in value))
 
 
-def _pick_audio_key(example: dict, requested: str) -> str:
-    """Resolve the audio column, tolerating WebDataset extension-named columns.
+def _find_audio(example: dict, requested: str) -> tuple[str, object] | None:
+    """Return ``(column, value)`` of the audio in ``example``, or ``None`` if it has none.
 
-    Prefers ``requested``; else the first known audio-extension column; else any other
-    column holding audio bytes. Raises a key-listing ``KeyError`` when none qualifies.
+    Prefers ``requested``, then a known audio-extension column, then any other column holding
+    audio bytes. ``None`` (not an error) lets callers skip metadata-only examples.
     """
-    if _is_audio_value(example.get(requested)):
-        return requested
-    for key in _AUDIO_KEY_HINTS:
+    for key in (requested, *_AUDIO_KEY_HINTS):
         if _is_audio_value(example.get(key)):
-            return key
+            return key, example[key]
     for key, value in example.items():
         if key not in ("__key__", "__url__", "json") and _is_audio_value(value):
-            return key
-    raise KeyError(
-        f"no audio column in {list(example.keys())} (requested --audio-key {requested!r}); "
-        "pass --audio-key or run --inspect"
-    )
+            return key, value
+    return None
 
 
 def _write_pool(
@@ -96,15 +93,14 @@ def _write_pool(
     out.mkdir(parents=True, exist_ok=True)
     min_len = int(min_seconds * SAMPLE_RATE)
     kept = skipped = 0
-    key = None
     for i, example in enumerate(examples):
         if kept >= n_clips or (max_stream and i >= max_stream):
             break
-        if key is None:  # resolve the audio column once (the stream is homogeneous)
-            key = _pick_audio_key(example, audio_key)
-            if key != audio_key:
-                print(f"audio column {audio_key!r} not present; using {key!r}")
-        raw = example[key]
+        found = _find_audio(example, audio_key)
+        if found is None:
+            skipped += 1  # metadata-only example (unpaired WebDataset entry) — no audio to decode
+            continue
+        raw = found[1]
         try:
             # WebDataset members arrive as raw bytes; parquet Audio as a {bytes|path} dict.
             wav = _decode_16k_mono(raw if isinstance(raw, dict) else {"bytes": raw})
@@ -152,27 +148,31 @@ def prepare_audio_pool(
 def inspect_pool(
     dataset: str, *, config: str | None = None, split: str = "train", audio_key: str = "audio", n: int = 1
 ) -> None:
-    """Print the fields of the first ``n`` streamed examples and decode one clip."""
+    """Print the keys of the first ``n`` streamed examples and decode the first audio clip found.
+
+    Some streams (e.g. 0x3/vocal-bursts) interleave audio with metadata-only examples, so the
+    first example may carry no audio; a bounded prefix is scanned to find and decode-check one.
+    """
     stream = _stream(dataset, config, split)
+    scan = max(n, 500)
     for i, example in enumerate(stream):
-        if i >= n:
+        if i < n:
+            print(f"keys = {list(example.keys())}")
+        found = _find_audio(example, audio_key)
+        if found is not None:
+            key, raw = found
+            audio = raw if isinstance(raw, dict) else {"bytes": raw}  # WebDataset member -> wrap bytes
+            note = "" if key == audio_key else f" (auto-detected; --audio-key {audio_key!r} absent)"
+            print(f"audio column = {key!r}{note}; bytes={'yes' if audio.get('bytes') else 'no'}")
+            try:
+                wav = _decode_16k_mono(audio)
+                print(f"  decoded OK -> {len(wav)} samples @ 16 kHz mono ({len(wav) / SAMPLE_RATE:.2f}s)")
+            except Exception as exc:
+                print(f"  decode FAILED: {exc!r}")
+            return
+        if i + 1 >= scan:
             break
-        print(f"keys = {list(example.keys())}")
-        try:
-            key = _pick_audio_key(example, audio_key)
-        except KeyError as exc:
-            print(f"  {exc}")
-            continue
-        if key != audio_key:
-            print(f"  auto-detected audio column {key!r} (--audio-key {audio_key!r} not present)")
-        raw = example[key]
-        audio = raw if isinstance(raw, dict) else {"bytes": raw}  # WebDataset member -> wrap bytes
-        print(f"  audio fields = {list(audio.keys())}, bytes={'yes' if audio.get('bytes') else 'no'}")
-        try:
-            wav = _decode_16k_mono(audio)
-            print(f"  decoded OK -> {len(wav)} samples @ 16 kHz mono ({len(wav) / SAMPLE_RATE:.2f}s)")
-        except Exception as exc:
-            print(f"  decode FAILED: {exc!r}")
+    print(f"no audio-bearing example in the first {scan} streamed — check --audio-key or the dataset layout")
 
 
 def main() -> None:
