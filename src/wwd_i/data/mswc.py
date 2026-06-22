@@ -52,6 +52,9 @@ class _WordSelector:
 def _load_stream(dataset: str, config: str, split: str):
     import datasets
 
+    from wwd_i.data._datasets_compat import patch_datasets_py314
+
+    patch_datasets_py314()  # py3.14: fix datasets' _batch_setitems fingerprint override
     # MSWC ships as a loading script; datasets >= 4 dropped script support entirely.
     if int(datasets.__version__.split(".", 1)[0]) >= 4:
         raise RuntimeError(

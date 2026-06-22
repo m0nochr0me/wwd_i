@@ -28,6 +28,9 @@ def _stream(dataset: str, config: str | None, split: str, *, audio_key: str = "a
     """Streaming HF dataset with ``audio_key`` left undecoded ({bytes|path})."""
     import datasets
 
+    from wwd_i.data._datasets_compat import patch_datasets_py314
+
+    patch_datasets_py314()  # py3.14: fix datasets' _batch_setitems fingerprint override
     ds = datasets.load_dataset(dataset, config, split=split, streaming=True)
     # Decode ourselves (soundfile + soxr); datasets' Audio decoder pulls librosa/numba
     # (no py3.14 wheel). decode=False yields {bytes|path}, which _decode_16k_mono handles.
