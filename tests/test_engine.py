@@ -22,18 +22,19 @@ D, H = 96, 48
 HOP_S = MEL_FRAMES_PER_FRAME * HOP_LENGTH / SAMPLE_RATE  # 0.08 s — one embedding per 80 ms frame
 
 
-def _toy_head(path):
+def _toy_head(path, bias=0.5):
     """A minimal stateful GRU-ish head with the export contract
     (embedding[1,1,D], h0[1,1,H]) -> (prob[1,1], hn[1,1,H]). State persists
-    (Wh=0.9·I) and a positive bias drives P(wake) high, so it both carries
-    history and reliably crosses a 0.5 threshold."""
+    (Wh=0.9·I) and the output ``bias`` sets the firing regime: the default +0.5
+    drives P(wake) above 0.5, a large negative bias keeps it near 0 (a head that
+    never fires) — used to tell two heads apart in the multi-head test."""
     rng = np.random.default_rng(0)
     arrays = {
         "Wx": (rng.standard_normal((D, H)) * 0.05).astype(np.float32),
         "Wh": (0.9 * np.eye(H)).astype(np.float32),
         "bh": np.full(H, 0.3, np.float32),
         "Wo": np.full((H, 1), 0.5, np.float32),
-        "bo": np.array([0.5], np.float32),
+        "bo": np.array([bias], np.float32),
         "se": np.array([-1, D], np.int64),
         "sh": np.array([-1, H], np.int64),
         "shn": np.array([1, 1, H], np.int64),
@@ -110,6 +111,27 @@ def test_streaming_matches_batch_with_agc(tmp_path):
     assert len(batch) == len(stream) > 0
     diff = np.max(np.abs([d.score for d in batch] - np.array([d.score for d in stream])))
     assert diff < 1e-4, f"AGC seam/state mismatch: {diff}"
+
+
+def test_multi_head_tags_words_and_matches_single(tmp_path):
+    """Several heads share the one mel+backbone; each detection is tagged with the
+    word of the head that fired, and a head's detections are identical whether it
+    runs alone or alongside others (the embedding is word-independent)."""
+    fires = _toy_head(tmp_path / "alpha.onnx", bias=0.5)  # crosses 0.5 on noise
+    silent = _toy_head(tmp_path / "beta.onnx", bias=-50.0)  # P(wake) ~ 0, never fires
+    sig = _noise(60, seed=5)
+
+    multi = WakeWordEngine([fires, silent], threshold=0.5, refractory_s=0.0)
+    dets = multi.push(sig)
+
+    assert {h.word for h in multi.heads} == {"alpha", "beta"}  # word from each head's filename stem
+    assert dets, "the firing head should produce detections"
+    assert all(d.word == "alpha" for d in dets)  # only the firing head fires, tagged by its word
+
+    # running 'alpha' alongside 'beta' == running it solo (shared backbone, independent heads)
+    solo = WakeWordEngine(fires, threshold=0.5, refractory_s=0.0).push(sig)
+    assert [d.time_s for d in dets] == [d.time_s for d in solo]
+    np.testing.assert_allclose([d.score for d in dets], [d.score for d in solo], atol=1e-6)
 
 
 def test_rms_normalizer_gain_invariant_and_chunk_safe():

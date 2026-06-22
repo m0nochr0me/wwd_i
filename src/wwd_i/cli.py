@@ -5,8 +5,10 @@ Two modes:
 * Phase-0 throughput harness (default): stream a file or the microphone through
   an ONNX model (a generated identity model unless ``--model`` is given) and
   report throughput.
-* Wake-word detection (``--head <word>_head.onnx``): wire mel -> backbone -> head
-  and print detection events with timestamps.
+* Wake-word detection (``--head <word>_head.onnx``, repeatable): wire mel ->
+  backbone -> head(s) and print detection events with timestamps. Pass ``--head``
+  more than once to run several words off the one shared backbone; each event is
+  tagged with the word that fired.
 """
 
 import argparse
@@ -32,15 +34,16 @@ def _run_detect(args: argparse.Namespace) -> int:
         normalize=not args.no_normalize,
     )
     frames = mic_frames() if args.mic else file_frames(args.source)
-    print(
-        f"detecting {engine.word!r} (threshold {engine.threshold:.3f}, "
-        f"refractory {engine.refractory_s:.2f}s){' — Ctrl-C to stop' if args.mic else ''}"
-    )
+    for head in engine.heads:
+        print(f"detecting {head.word!r} (threshold {head.threshold:.3f}, refractory {head.refractory_s:.2f}s)")
+    if args.mic:
+        print("listening — Ctrl-C to stop")
 
     report_every = max(1, round(1000 / FRAME_MS))  # ~1 s of frames between --debug lines
     captured: list[np.ndarray] = []
     count, compute, total = 0, 0.0, 0
-    win_score, win_rms = 0.0, 0.0  # running maxima since the last --debug report
+    win_scores = [0.0] * len(engine.heads)  # per-head running max P(wake) since the last --debug report
+    win_rms = 0.0
     try:
         for frame in frames:
             t0 = perf_counter()
@@ -49,16 +52,18 @@ def _run_detect(args: argparse.Namespace) -> int:
             count += 1
             for d in dets:
                 total += 1
-                print(f"  \N{HIGH VOLTAGE SIGN} {engine.word!r} @ {d.time_s:6.2f}s  score={d.score:.3f}")
+                print(f"  \N{HIGH VOLTAGE SIGN} {d.word!r} @ {d.time_s:6.2f}s  score={d.score:.3f}")
             if args.save is not None:
                 captured.append(np.asarray(frame, dtype=np.float32))
             if args.debug:
-                win_score = max(win_score, engine.last_score)
                 win_rms = max(win_rms, float(np.sqrt(np.mean(np.square(frame, dtype=np.float64)))))
+                win_scores = [max(w, h.last_score) for w, h in zip(win_scores, engine.heads, strict=True)]
                 if count % report_every == 0:
                     dbfs = 20 * np.log10(win_rms + 1e-9)
-                    print(f"  [debug] input {dbfs:6.1f} dBFS  max P(wake)={win_score:.3f}")
-                    win_score, win_rms = 0.0, 0.0
+                    scores = "  ".join(f"{h.word!r}={w:.3f}" for w, h in zip(win_scores, engine.heads, strict=True))
+                    print(f"  [debug] input {dbfs:6.1f} dBFS  max P(wake) {scores}")
+                    win_scores = [0.0] * len(engine.heads)
+                    win_rms = 0.0
     except KeyboardInterrupt:  # pragma: no cover - interactive
         print("\nstopped")
     finally:
@@ -110,8 +115,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("source", nargs="?", help="audio file to stream; omit when using --mic")
     parser.add_argument("--mic", action="store_true", help="stream from the default microphone")
     parser.add_argument("--model", type=Path, help="ONNX model for the throughput harness (default: identity)")
-    parser.add_argument("--head", type=Path, help="per-word head ONNX; switches to wake-word detection")
-    parser.add_argument("--calibration", type=Path, help="head calibration json (default: <head>.json)")
+    parser.add_argument(
+        "--head",
+        type=Path,
+        action="append",
+        help="per-word head ONNX; switches to wake-word detection. Repeat to run several words "
+        "off the one shared backbone (each detection is tagged with its word).",
+    )
+    parser.add_argument(
+        "--calibration", type=Path, help="head calibration json (default: <head>.json); single --head only"
+    )
     parser.add_argument("--threshold", type=float, help="override the calibrated detection threshold")
     parser.add_argument("--refractory", type=float, help="override the debounce window (seconds)")
     parser.add_argument(
@@ -125,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mic == bool(args.source):
         parser.error("provide either an audio file or --mic (not both)")
+    if args.head and len(args.head) > 1 and args.calibration is not None:
+        parser.error("--calibration applies to a single --head; with multiple heads each uses its sibling <head>.json")
 
     return _run_detect(args) if args.head else _run_harness(args)
 

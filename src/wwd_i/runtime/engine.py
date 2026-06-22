@@ -5,6 +5,11 @@ pushed in arbitrary-sized chunks; the engine keeps rolling buffers so the output
 is identical whether the same audio arrives as one block or as a stream of 80 ms
 frames (the Phase-5 parity gate).
 
+The mel front-end and backbone are word-independent and shared, so one engine
+can run several per-word heads at once: each hop is embedded once, then every
+head scores that shared embedding and each ``Detection`` is tagged with the word
+of the head that fired (e.g. ``Samara`` vs ``whispers_Samara``).
+
 Cadence (must match ``train.train_head._windows``): the log-mel front-end emits
 8 mel frames per 80 ms (``MEL_FRAMES_PER_FRAME``); the backbone embeds a rolling
 ``WINDOW``-frame window advanced 8 frames per hop -> one 96-d embedding every
@@ -20,6 +25,7 @@ inference install) never imports torch.
 
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
@@ -106,9 +112,11 @@ def _low_cpu_options() -> ort.SessionOptions:
 
 @dataclass(frozen=True)
 class Detection:
-    """A wake-word firing: ``time_s`` is the audio time at the end of the window
-    that triggered it; ``score`` is ``P(wake)`` at that hop."""
+    """A wake-word firing: ``word`` is which head fired (so multiple heads can
+    drive different responses), ``time_s`` is the audio time at the end of the
+    window that triggered it, ``score`` is ``P(wake)`` at that hop."""
 
+    word: str
     time_s: float
     score: float
 
@@ -118,17 +126,77 @@ def _packaged(name: str) -> str:
     return str(files("wwd_i.models") / name)
 
 
-class WakeWordEngine:
-    """Stateful streaming detector for one wake word.
+class _Head:
+    """One per-word GRU head: its ORT session, calibrated operating point, and
+    streaming fire state.
 
-    Feed audio with :meth:`push`; it returns the detections that fired during that
-    call. Construct one engine per stream and :meth:`reset` between independent
-    streams (or use :func:`detect_file`).
+    The embedding it scores comes from the engine's *shared* mel + backbone, so
+    every extra word costs one tiny head session and ``HEAD_CONTEXT_HOPS`` head
+    runs per hop — not a second backbone pass. ``step`` re-runs the head from a
+    ZERO state over the trailing embeddings the engine hands it (the
+    max-over-time criterion — see ``HEAD_CONTEXT_HOPS``) and applies this head's
+    own threshold + refractory debounce; the fire timer and last score are per
+    word.
+    """
+
+    def __init__(self, session: ort.InferenceSession, *, word: str, threshold: float, refractory_s: float) -> None:
+        self.session = session
+        self.word = word
+        self.threshold = float(threshold)
+        self.refractory_s = float(refractory_s)
+        ins = session.get_inputs()
+        self._emb_in, self._h_in = (i.name for i in ins)
+        self._prob_out, self._hn_out = (o.name for o in session.get_outputs())
+        self.hidden = int(ins[1].shape[-1])
+        self.emb_dim = int(ins[0].shape[-1])
+        self.reset()
+
+    def reset(self) -> None:
+        self._last_fire_s = -math.inf
+        self.last_score = 0.0  # most recent hop's P(wake), regardless of threshold (diagnostics)
+
+    def _score(self, emb_buf: np.ndarray) -> float:
+        """Max ``P(wake)`` over the trailing embeddings, from a ZERO GRU state —
+        ``sigmoid`` of the max-over-time clip logit the head was trained on."""
+        h = np.zeros((1, 1, self.hidden), dtype=np.float32)
+        best = 0.0
+        for e in emb_buf:
+            prob, h = self.session.run(
+                [self._prob_out, self._hn_out],
+                {self._emb_in: e[None, None].astype(np.float32), self._h_in: h},
+            )
+            best = max(best, float(np.asarray(prob).reshape(-1)[0]))
+        return best
+
+    def step(self, emb_buf: np.ndarray, t_end: float) -> Detection | None:
+        """Score the current window; fire (a Detection tagged with this word) when
+        above threshold and past the refractory window, else return None."""
+        score = self._score(emb_buf)
+        self.last_score = score
+        if score >= self.threshold and (t_end - self._last_fire_s) >= self.refractory_s:
+            self._last_fire_s = t_end
+            return Detection(word=self.word, time_s=t_end, score=score)
+        return None
+
+
+class WakeWordEngine:
+    """Stateful streaming detector for one or more wake words.
+
+    The mel front-end and backbone are shared: each 80 ms hop is embedded once,
+    then every head scores that same embedding, so running N words costs one
+    backbone pass plus N tiny heads (not N full pipelines). Each detection is
+    tagged with the ``word`` of the head that fired, so e.g. ``Samara`` and
+    ``whispers_Samara`` heads can trigger different responses downstream.
+
+    Pass a single head path (the calibrated single-word detector) or a list of
+    them. Feed audio with :meth:`push`; it returns the detections that fired
+    during that call. Construct one engine per stream and :meth:`reset` between
+    independent streams (or use :func:`detect_file`).
     """
 
     def __init__(
         self,
-        head_path: str | Path,
+        heads: str | Path | Sequence[str | Path],
         *,
         calibration: str | Path | None = None,
         backbone_path: str | Path = "",
@@ -137,32 +205,51 @@ class WakeWordEngine:
         refractory_s: float | None = None,
         normalize: bool = True,
     ) -> None:
-        head_path = Path(head_path)
-        meta = self._load_calibration(head_path, calibration)
-        self.word: str = meta.get("word", head_path.stem)
-        if threshold is None:
-            threshold = meta.get("threshold")
-        if threshold is None:
+        head_paths = [Path(heads)] if isinstance(heads, (str, Path)) else [Path(h) for h in heads]
+        if not head_paths:
+            raise ValueError("WakeWordEngine needs at least one head")
+        if calibration is not None and len(head_paths) > 1:
             raise ValueError(
-                f"no threshold: pass threshold=... or a calibration json (looked for {head_path.with_suffix('.json')})"
+                "calibration= applies to a single head; with multiple heads each uses its sibling <head>.json"
             )
-        self.threshold = float(threshold)
-        self.refractory_s = float(refractory_s if refractory_s is not None else meta.get("refractory_seconds", 1.0))
 
         opts = _low_cpu_options()
         self._mel_session = load_session(mel_path or _packaged("melspec.onnx"), opts)
         self._backbone = load_session(backbone_path or _packaged("backbone.onnx"), opts)
-        self._head = load_session(str(head_path), opts)
-
         self._mel_in = self._mel_session.get_inputs()[0].name
         self._bb_in = self._backbone.get_inputs()[0].name
-        self._emb_in, self._h_in = (i.name for i in self._head.get_inputs())
-        self._prob_out, self._hn_out = (o.name for o in self._head.get_outputs())
-        self._hidden = int(self._head.get_inputs()[1].shape[-1])
-        self._emb_dim = int(self._head.get_inputs()[0].shape[-1])
         self._normalize = normalize
 
+        self.heads = [self._build_head(p, calibration, threshold, refractory_s, opts) for p in head_paths]
+        self._emb_dim = self.heads[0].emb_dim  # shared backbone -> every head consumes the same dim
+        if any(h.emb_dim != self._emb_dim for h in self.heads):
+            raise ValueError("all heads must consume the same backbone embedding dim")
+
         self.reset()
+
+    def _build_head(
+        self,
+        head_path: Path,
+        calibration: str | Path | None,
+        threshold: float | None,
+        refractory_s: float | None,
+        opts: ort.SessionOptions,
+    ) -> _Head:
+        """Load one head ONNX and resolve its operating point: explicit override,
+        else its calibration json (sibling ``<head>.json`` unless given)."""
+        meta = self._load_calibration(head_path, calibration)
+        thr = threshold if threshold is not None else meta.get("threshold")
+        if thr is None:
+            raise ValueError(
+                f"no threshold for {head_path.name}: pass threshold=... or a calibration json "
+                f"(looked for {head_path.with_suffix('.json')})"
+            )
+        return _Head(
+            load_session(str(head_path), opts),
+            word=meta.get("word", head_path.stem),
+            threshold=thr,
+            refractory_s=refractory_s if refractory_s is not None else meta.get("refractory_seconds", 1.0),
+        )
 
     @staticmethod
     def _load_calibration(head_path: Path, calibration: str | Path | None) -> dict:
@@ -173,15 +260,33 @@ class WakeWordEngine:
             raise FileNotFoundError(f"calibration json not found: {path}")
         return {}
 
+    # Single-head convenience: the first head's operating point (use ``heads`` for N).
+    @property
+    def word(self) -> str:
+        return self.heads[0].word
+
+    @property
+    def threshold(self) -> float:
+        return self.heads[0].threshold
+
+    @property
+    def refractory_s(self) -> float:
+        return self.heads[0].refractory_s
+
+    @property
+    def last_score(self) -> float:
+        """Most recent hop's max ``P(wake)`` across all heads (diagnostics)."""
+        return max(h.last_score for h in self.heads)
+
     def reset(self) -> None:
-        """Clear all streaming state — buffers, rolling embedding window, timers."""
+        """Clear all streaming state — buffers, rolling embedding window, per-head timers."""
         self._mel = MelStreamer(self._mel_fn)
         self._agc = _RmsNormalizer(int(AGC_WINDOW_S * SAMPLE_RATE)) if self._normalize else None
         self._mel_buf = np.zeros((0, self._n_mels()), dtype=np.float32)
-        self._emb_buf = np.zeros((0, self._emb_dim), dtype=np.float32)  # trailing HEAD_CONTEXT_HOPS embeddings
+        self._emb_buf = np.zeros((0, self._emb_dim), dtype=np.float32)  # shared trailing HEAD_CONTEXT_HOPS embeddings
         self._hop = 0
-        self._last_fire_s = -math.inf
-        self.last_score = 0.0  # most recent hop's P(wake), regardless of threshold (diagnostics)
+        for head in self.heads:
+            head.reset()
 
     def _n_mels(self) -> int:
         return int(self._backbone.get_inputs()[0].shape[-1])
@@ -203,39 +308,17 @@ class WakeWordEngine:
         dets: list[Detection] = []
         while self._mel_buf.shape[0] >= WINDOW:
             window = self._mel_buf[:WINDOW][None]  # [1, WINDOW, n_mels]
-            emb = self._backbone.run(None, {self._bb_in: window})[0]  # [1, D]
+            emb = self._backbone.run(None, {self._bb_in: window})[0]  # [1, D] — embed once, shared by all heads
             self._emb_buf = np.concatenate([self._emb_buf, emb])[-HEAD_CONTEXT_HOPS:]
-            score = self._score_window()
             t_end = (self._hop * MEL_FRAMES_PER_FRAME + WINDOW) * HOP_LENGTH / SAMPLE_RATE
             self._hop += 1
             self._mel_buf = self._mel_buf[MEL_FRAMES_PER_FRAME:]
 
-            self.last_score = score
-            if score >= self.threshold and (t_end - self._last_fire_s) >= self.refractory_s:
-                dets.append(Detection(time_s=t_end, score=score))
-                self._last_fire_s = t_end
+            for head in self.heads:
+                det = head.step(self._emb_buf, t_end)
+                if det is not None:
+                    dets.append(det)
         return dets
-
-    def _score_window(self) -> float:
-        """P(wake) for the current rolling window, scored the way the head was trained.
-
-        Re-runs the head from a ZERO hidden state over the trailing
-        ``HEAD_CONTEXT_HOPS`` embeddings and returns the max per-hop probability —
-        i.e. ``sigmoid`` of the max-over-time clip logit (``train.train_head`` BCE
-        target). Recomputing from zero each hop, rather than carrying one state across
-        the whole stream, is what keeps the GRU on the short-clip manifold it was
-        trained on (see ``HEAD_CONTEXT_HOPS``). The cost is ``HEAD_CONTEXT_HOPS`` tiny
-        head runs per hop (~10 × a 48-unit GRU), negligible against the backbone.
-        """
-        h = np.zeros((1, 1, self._hidden), dtype=np.float32)
-        best = 0.0
-        for e in self._emb_buf:
-            prob, h = self._head.run(
-                [self._prob_out, self._hn_out],
-                {self._emb_in: e[None, None].astype(np.float32), self._h_in: h},
-            )
-            best = max(best, float(np.asarray(prob).reshape(-1)[0]))
-        return best
 
 
 def detect_file(engine: WakeWordEngine, path: str | Path) -> list[Detection]:
