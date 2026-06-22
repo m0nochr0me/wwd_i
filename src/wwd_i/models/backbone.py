@@ -151,14 +151,16 @@ def _assert_loudness_invariant(path: str | Path, n_mels: int) -> None:
     exporting pre-normalization code, which ships a loudness-sensitive backbone and
     quietly breaks every head and bg cache trained against it.
     """
+    from typing import cast
+
     import numpy as np
     import onnxruntime as ort
 
     sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     name = sess.get_inputs()[0].name
     mel = np.random.default_rng(0).standard_normal((2, 76, n_mels)).astype(np.float32)
-    base = sess.run(None, {name: mel})[0]
-    loud = sess.run(None, {name: (mel + 4.605).astype(np.float32)})[0]  # +20 dB == +ln(100)/bin
+    base = cast(np.ndarray, sess.run(None, {name: mel})[0])
+    loud = cast(np.ndarray, sess.run(None, {name: (mel + 4.605).astype(np.float32)})[0])  # +20 dB == +ln(100)/bin
     cos = (base * loud).sum(1) / (np.linalg.norm(base, axis=1) * np.linalg.norm(loud, axis=1))
     if not (cos > 0.999).all():
         raise RuntimeError(

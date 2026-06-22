@@ -1,3 +1,5 @@
+from typing import cast
+
 import numpy as np
 import pytest
 
@@ -56,7 +58,7 @@ def test_head_onnx_streaming_parity(tmp_path):
     probs = []
     for t in range(12):  # advance one hop at a time, carrying state
         p, h = sess.run(None, {"embedding": emb[:, t : t + 1, :].numpy(), "h0": h})
-        probs.append(float(p[0, 0]))
+        probs.append(float(cast(np.ndarray, p)[0, 0]))
     assert np.max(np.abs(np.array(probs) - ref)) < 1e-3  # streaming == batch
 
 

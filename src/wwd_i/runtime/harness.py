@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
+from typing import cast
 
 import numpy as np
 import onnxruntime as ort
@@ -50,5 +51,5 @@ def run_stream(
         compute += perf_counter() - t0
         count = index + 1
         if on_output is not None:
-            on_output(index, out)
+            on_output(index, cast(np.ndarray, out))
     return StreamStats(frames=count, audio_ms=count * FRAME_MS, compute_ms=compute * 1000.0)

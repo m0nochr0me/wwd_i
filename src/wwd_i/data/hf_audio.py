@@ -16,6 +16,7 @@ and decoding before a large sample. See docs/architecture.md §7.
 import argparse
 from collections.abc import Iterable
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import soundfile as sf
@@ -42,7 +43,7 @@ def _stream(dataset: str, config: str | None, split: str):
     from wwd_i.data._datasets_compat import patch_datasets_py314
 
     patch_datasets_py314()  # py3.14: fix datasets' _batch_setitems fingerprint override
-    ds = datasets.load_dataset(dataset, config, split=split, streaming=True)
+    ds = cast(datasets.IterableDataset, datasets.load_dataset(dataset, config, split=split, streaming=True))
     ds.info.features = None
     return ds
 

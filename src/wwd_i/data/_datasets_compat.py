@@ -30,7 +30,7 @@ def patch_datasets_py314() -> None:
     import dill
 
     override_params = inspect.signature(_dd.Pickler._batch_setitems).parameters
-    parent_params = inspect.signature(dill.Pickler._batch_setitems).parameters
+    parent_params = inspect.signature(dill.Pickler._batch_setitems).parameters  # ty: ignore[unresolved-attribute]
     if "obj" in override_params or "obj" not in parent_params:
         # datasets already 3.14-compatible, or this Python predates the change.
         _patched = True
@@ -46,7 +46,7 @@ def patch_datasets_py314() -> None:
             items = sorted(items)
         except Exception:  # unorderable elements
             items = sorted(items, key=lambda x: Hasher.hash(x[0]))
-        dill.Pickler._batch_setitems(self, items, obj)
+        dill.Pickler._batch_setitems(self, items, obj)  # ty: ignore[unresolved-attribute]
 
-    _dd.Pickler._batch_setitems = _batch_setitems
+    _dd.Pickler._batch_setitems = _batch_setitems  # ty: ignore[invalid-assignment]
     _patched = True

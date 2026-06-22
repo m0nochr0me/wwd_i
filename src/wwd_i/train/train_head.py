@@ -14,6 +14,7 @@ import argparse
 import copy
 import json
 from pathlib import Path
+from typing import cast
 
 # isort: off
 import numpy as np
@@ -86,7 +87,7 @@ def embed_clips(clips: list[np.ndarray], session: ort.InferenceSession, *, batch
     for start in range(0, len(clips), batch):
         chunk = clips[start : start + batch]
         seqs = [_windows(compute_logmel(c)) for c in chunk]
-        emb = session.run(None, {name: np.concatenate(seqs, axis=0)})[0]  # [len(chunk)*W, D]
+        emb = cast(np.ndarray, session.run(None, {name: np.concatenate(seqs, axis=0)})[0])  # [len(chunk)*W, D]
         out.append(emb.reshape(len(chunk), seqs[0].shape[0], emb.shape[-1]))
         print(f"  {min(start + batch, len(clips))}/{len(clips)}", flush=True)
     return np.concatenate(out, axis=0)

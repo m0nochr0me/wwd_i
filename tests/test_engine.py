@@ -7,6 +7,8 @@ embedding and the previous state, so a dropped-state or mis-fed-embedding bug in
 the engine changes its probability sequence and the parity test catches it.
 """
 
+from typing import cast
+
 import numpy as np
 import onnx
 import pytest
@@ -228,11 +230,12 @@ def test_packaged_melspec_onnx_parity():
     from wwd_i.features.melspec import compute_logmel
 
     path = files("wwd_i.models") / "melspec.onnx"
-    assert not path.with_suffix(".onnx.data").exists()  # inline weights, ships as one file
+    assert not path.with_suffix(".onnx.data").exists()  # ty: ignore[unresolved-attribute] (Traversable is Path at runtime; inline weights ship as one file)
     sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     name = sess.get_inputs()[0].name
     rng = np.random.default_rng(2)
     for n in (SAMPLE_RATE, int(1.5 * SAMPLE_RATE)):  # dynamic sample length
         sig = rng.standard_normal(n).astype(np.float32)
-        err = np.max(np.abs(sess.run(None, {name: sig[None]})[0][0] - compute_logmel(sig)))
+        out = cast(np.ndarray, sess.run(None, {name: sig[None]})[0])
+        err = np.max(np.abs(out[0] - compute_logmel(sig)))
         assert err < 1e-3

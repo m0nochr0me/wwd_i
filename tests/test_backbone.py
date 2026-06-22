@@ -1,3 +1,5 @@
+from typing import cast
+
 import numpy as np
 import pytest
 
@@ -76,7 +78,7 @@ def test_prototypical_training_converges():
             last.append(acc.item())
 
     assert last and sum(last) / len(last) > 0.6  # 4-way: chance is 0.25
-    assert loss.item() < first  # loss decreased over training
+    assert first is not None and loss.item() < first  # loss decreased over training
 
 
 def test_onnx_parity(tmp_path):
@@ -91,7 +93,7 @@ def test_onnx_parity(tmp_path):
         mel = torch.randn(batch, frames, N_MELS)
         with torch.no_grad():
             ref = model(mel).numpy()
-        onnx_out = sess.run(None, {"mel": mel.numpy()})[0]
+        onnx_out = cast(np.ndarray, sess.run(None, {"mel": mel.numpy()})[0])
         assert onnx_out.shape == ref.shape == (batch, model.config.embedding_dim)
         assert np.max(np.abs(onnx_out - ref)) < 1e-3
 

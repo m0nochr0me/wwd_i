@@ -153,9 +153,11 @@ class GPUAugmenter:
 
     def _noise(self, audio: Tensor) -> Tensor:
         """Add a random background crop at a sampled SNR (vectorized over the batch)."""
+        bank = self.bank
+        assert bank is not None  # forward() only calls _noise when the noise bank is set
         b, length = audio.shape
         fire = self._rand(b) < self.p_noise
-        p, lpool = self.bank.shape
+        p, lpool = bank.shape
         nidx = torch.randint(0, p, (b,), generator=self.gen, device=self.device)
         max_off = lpool - length
         off = (
@@ -164,7 +166,7 @@ class GPUAugmenter:
             else torch.zeros(b, dtype=torch.long, device=self.device)
         )
         cols = off[:, None] + torch.arange(length, device=self.device)
-        noise = self.bank.index_select(0, nidx).gather(1, cols)  # [B, L]
+        noise = bank.index_select(0, nidx).gather(1, cols)  # [B, L]
         snr = self._uniform(b, *self.snr_db)
         gain = (audio.pow(2).mean(dim=1).sqrt() + _EPS) / (
             (noise.pow(2).mean(dim=1).sqrt() + _EPS) * 10.0 ** (snr / 20.0)

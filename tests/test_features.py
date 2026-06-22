@@ -1,3 +1,5 @@
+from typing import cast
+
 import numpy as np
 import pytest
 
@@ -32,7 +34,7 @@ def test_onnx_parity(tmp_path):
 
     sig = _signal(1.0)
     ref = compute_logmel(sig)
-    onnx_out = sess.run(None, {"audio": sig[None, :]})[0][0]
+    onnx_out = cast(np.ndarray, sess.run(None, {"audio": sig[None, :]})[0])[0]
 
     assert onnx_out.shape == ref.shape
     assert np.max(np.abs(onnx_out - ref)) < 1e-3

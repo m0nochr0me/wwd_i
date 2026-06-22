@@ -29,6 +29,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import onnxruntime as ort
@@ -293,7 +294,7 @@ class WakeWordEngine:
 
     def _mel_fn(self, signal: np.ndarray) -> np.ndarray:
         """Run the mel ONNX over a 1-D signal -> ``[frames, n_mels]`` (MelStreamer adapter)."""
-        out = self._mel_session.run(None, {self._mel_in: signal[None].astype(np.float32)})[0]
+        out = cast(np.ndarray, self._mel_session.run(None, {self._mel_in: signal[None].astype(np.float32)})[0])
         return out[0]
 
     def push(self, samples: np.ndarray) -> list[Detection]:

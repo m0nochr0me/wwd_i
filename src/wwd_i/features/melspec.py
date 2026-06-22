@@ -64,6 +64,9 @@ def _mel_filterbank() -> Tensor:
 class MelSpectrogram(nn.Module):
     """Map audio ``[B, T]`` to log-mel ``[B, frames, n_mels]`` (center=False)."""
 
+    dft: Tensor  # registered buffers, annotated so the type checker sees Tensor not Module
+    mel_fb: Tensor
+
     def __init__(self) -> None:
         super().__init__()
         self.register_buffer("dft", _dft_conv_weight())  # [2F, 1, win]
