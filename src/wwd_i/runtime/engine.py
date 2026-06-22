@@ -8,9 +8,11 @@ frames (the Phase-5 parity gate).
 Cadence (must match ``train.train_head._windows``): the log-mel front-end emits
 8 mel frames per 80 ms (``MEL_FRAMES_PER_FRAME``); the backbone embeds a rolling
 ``WINDOW``-frame window advanced 8 frames per hop -> one 96-d embedding every
-80 ms; the GRU head consumes one embedding per hop carrying its hidden state and
-emits ``P(wake)``; crossing the calibrated threshold fires a detection, then a
-refractory window debounces repeats.
+80 ms; the GRU head is then re-run from zero state over the trailing
+``HEAD_CONTEXT_HOPS`` embeddings and its max-over-time ``P(wake)`` is taken — the
+exact criterion the head was trained and calibrated on (see ``HEAD_CONTEXT_HOPS``);
+crossing the calibrated threshold fires a detection, then a refractory window
+debounces repeats.
 
 Torch-free: every stage runs in ONNX Runtime, so this module (and the whole
 inference install) never imports torch.
@@ -33,6 +35,16 @@ from wwd_i.runtime.harness import load_session
 # Mel frames per backbone window (~760 ms). MUST equal train.train_head.WINDOW,
 # which defines the window the head was trained on; tests/test_engine.py asserts it.
 WINDOW = 76
+
+# Head context: number of 80 ms hops the head sees per decision. The head is trained and
+# calibrated on a ``train.train_head.CLIP_SECONDS`` (1.5 s) clip, which is exactly this many
+# backbone hops, and supervised by the MAX over those hops' logits from a ZERO initial GRU
+# state. The runtime must score the same way: each hop, re-run the head from zero state over
+# the trailing HEAD_CONTEXT_HOPS embeddings and take the max P(wake). Carrying one hidden
+# state across the whole stream instead (the obvious "streaming GRU") drives the state off
+# the short-clip manifold the head ever saw — ‖h‖ grows without bound — and collapses
+# P(wake) to ~0 after the first seconds. tests/test_engine.py pins this to the train value.
+HEAD_CONTEXT_HOPS = 10
 
 # Loudness normalization (AGC). The frozen backbone is strongly loudness-sensitive
 # — a -12 dB input level drop already halves the embedding's cosine similarity, and
@@ -147,6 +159,7 @@ class WakeWordEngine:
         self._emb_in, self._h_in = (i.name for i in self._head.get_inputs())
         self._prob_out, self._hn_out = (o.name for o in self._head.get_outputs())
         self._hidden = int(self._head.get_inputs()[1].shape[-1])
+        self._emb_dim = int(self._head.get_inputs()[0].shape[-1])
         self._normalize = normalize
 
         self.reset()
@@ -161,13 +174,14 @@ class WakeWordEngine:
         return {}
 
     def reset(self) -> None:
-        """Clear all streaming state — buffers, GRU hidden state, timers."""
+        """Clear all streaming state — buffers, rolling embedding window, timers."""
         self._mel = MelStreamer(self._mel_fn)
         self._agc = _RmsNormalizer(int(AGC_WINDOW_S * SAMPLE_RATE)) if self._normalize else None
         self._mel_buf = np.zeros((0, self._n_mels()), dtype=np.float32)
-        self._h = np.zeros((1, 1, self._hidden), dtype=np.float32)
+        self._emb_buf = np.zeros((0, self._emb_dim), dtype=np.float32)  # trailing HEAD_CONTEXT_HOPS embeddings
         self._hop = 0
         self._last_fire_s = -math.inf
+        self.last_score = 0.0  # most recent hop's P(wake), regardless of threshold (diagnostics)
 
     def _n_mels(self) -> int:
         return int(self._backbone.get_inputs()[0].shape[-1])
@@ -190,19 +204,38 @@ class WakeWordEngine:
         while self._mel_buf.shape[0] >= WINDOW:
             window = self._mel_buf[:WINDOW][None]  # [1, WINDOW, n_mels]
             emb = self._backbone.run(None, {self._bb_in: window})[0]  # [1, D]
-            prob, self._h = self._head.run(
-                [self._prob_out, self._hn_out],
-                {self._emb_in: emb[None].astype(np.float32), self._h_in: self._h},
-            )
+            self._emb_buf = np.concatenate([self._emb_buf, emb])[-HEAD_CONTEXT_HOPS:]
+            score = self._score_window()
             t_end = (self._hop * MEL_FRAMES_PER_FRAME + WINDOW) * HOP_LENGTH / SAMPLE_RATE
             self._hop += 1
             self._mel_buf = self._mel_buf[MEL_FRAMES_PER_FRAME:]
 
-            score = float(np.asarray(prob).reshape(-1)[0])
+            self.last_score = score
             if score >= self.threshold and (t_end - self._last_fire_s) >= self.refractory_s:
                 dets.append(Detection(time_s=t_end, score=score))
                 self._last_fire_s = t_end
         return dets
+
+    def _score_window(self) -> float:
+        """P(wake) for the current rolling window, scored the way the head was trained.
+
+        Re-runs the head from a ZERO hidden state over the trailing
+        ``HEAD_CONTEXT_HOPS`` embeddings and returns the max per-hop probability —
+        i.e. ``sigmoid`` of the max-over-time clip logit (``train.train_head`` BCE
+        target). Recomputing from zero each hop, rather than carrying one state across
+        the whole stream, is what keeps the GRU on the short-clip manifold it was
+        trained on (see ``HEAD_CONTEXT_HOPS``). The cost is ``HEAD_CONTEXT_HOPS`` tiny
+        head runs per hop (~10 × a 48-unit GRU), negligible against the backbone.
+        """
+        h = np.zeros((1, 1, self._hidden), dtype=np.float32)
+        best = 0.0
+        for e in self._emb_buf:
+            prob, h = self._head.run(
+                [self._prob_out, self._hn_out],
+                {self._emb_in: e[None, None].astype(np.float32), self._h_in: h},
+            )
+            best = max(best, float(np.asarray(prob).reshape(-1)[0]))
+        return best
 
 
 def detect_file(engine: WakeWordEngine, path: str | Path) -> list[Detection]:

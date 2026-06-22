@@ -181,6 +181,21 @@ def test_window_matches_trainer():
     assert WINDOW == TRAIN_WINDOW
 
 
+def test_head_context_matches_trainer():
+    """The rolling head context must equal the hops in one training clip — the head's
+    threshold is calibrated on the max-over-time logit of exactly that many hops, so a
+    mismatch would invalidate the calibrated threshold at inference."""
+    pytest.importorskip("torch")
+    import numpy as np
+
+    from wwd_i.features.melspec import compute_logmel
+    from wwd_i.runtime.engine import HEAD_CONTEXT_HOPS
+    from wwd_i.train.train_head import CLIP_SECONDS, _windows
+
+    clip = np.zeros(int(CLIP_SECONDS * SAMPLE_RATE), dtype=np.float32)
+    assert HEAD_CONTEXT_HOPS == _windows(compute_logmel(clip)).shape[0]
+
+
 def test_packaged_melspec_onnx_parity():
     """The committed melspec.onnx matches the torch front-end and is self-contained."""
     pytest.importorskip("torch")
