@@ -18,6 +18,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from wwd_i.data.augment import Augmenter
+from wwd_i.data.backgrounds import load_background_pool
 from wwd_i.data.mswc import mswc_samplers
 from wwd_i.data.speech_commands import speech_commands_samplers
 from wwd_i.features.melspec import MelSpectrogram
@@ -34,12 +36,25 @@ def train(args: argparse.Namespace) -> None:
     model = Backbone(BackboneConfig(embedding_dim=args.embedding_dim)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    augment = None
+    if args.augment:
+        pool = (
+            load_background_pool(args.aug_bg_dir, max_clips=args.aug_max_bg, seed=args.seed) if args.aug_bg_dir else []
+        )
+        # p_gain=0: a constant gain is already a no-op for this backbone — it z-score
+        # normalizes every window (models/backbone._normalize_window), so gain carries no
+        # signal. The augmentations that survive normalization are reverb, speed, noise, clip.
+        augment = Augmenter(pool, p_gain=0.0, seed=args.seed)
+        print(f"augment ON | noise pool {len(pool)} clips | reverb+speed+noise+clip (gain skipped)")
+
     if args.dataset == "mswc":
         train_sampler, held_sampler = mswc_samplers(
-            args.root, n_held_out=args.mswc_held_out, limit=args.limit, seed=args.seed
+            args.root, n_held_out=args.mswc_held_out, limit=args.limit, seed=args.seed, augment=augment
         )
     else:
-        train_sampler, held_sampler = speech_commands_samplers(args.root, limit=args.limit, seed=args.seed)
+        train_sampler, held_sampler = speech_commands_samplers(
+            args.root, limit=args.limit, seed=args.seed, augment=augment
+        )
 
     def embed(audio: Tensor) -> Tensor:
         return model(melspec(audio))
@@ -92,6 +107,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--root", default="data/speech_commands", help="dataset dir (download/cache or prepared MSWC)")
     p.add_argument("--mswc-held-out", type=int, default=50, help="random words reserved for the probe (mswc)")
     p.add_argument("--limit", type=int, default=None, help="cap clips per word (fast local smoke run)")
+    p.add_argument(
+        "--augment",
+        action="store_true",
+        help="augment TRAINING clips (reverb/speed/noise/clip) for acoustic robustness; the probe stays clean",
+    )
+    p.add_argument(
+        "--aug-bg-dir",
+        nargs="*",
+        help="background-audio dirs for additive-noise augmentation (e.g. MUSAN); reverb+speed still apply without it",
+    )
+    p.add_argument("--aug-max-bg", type=int, default=2000, help="clips decoded into the augmentation noise pool")
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--embedding-dim", type=int, default=96)

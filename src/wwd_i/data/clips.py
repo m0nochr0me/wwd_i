@@ -6,6 +6,7 @@ such a directory, loads clips through the inference runtime's loader (soundfile)
 and builds the train / held-out episodic samplers used by metric learning.
 """
 
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -46,11 +47,14 @@ def split_samplers(
     held_out_words: list[str] | tuple[str, ...],
     limit: int | None = None,
     seed: int = 0,
+    augment: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> tuple[EpisodicSampler, EpisodicSampler]:
     """Split a word index into (train_sampler, held_out_sampler).
 
     ``held_out_words`` are reserved for the few-shot probe and never trained on;
-    ``limit`` caps clips kept per word (for fast runs).
+    ``limit`` caps clips kept per word (for fast runs). ``augment`` (if given) is
+    applied to **training** clips only — the probe must stay clean — and its
+    length-changing output (speed-perturb) is re-fixed to one clip length.
     """
     if limit is not None:
         index = {word: paths[:limit] for word, paths in index.items()}
@@ -59,7 +63,14 @@ def split_samplers(
     train = {word: paths for word, paths in index.items() if word not in held_set}
     if not train or not held:
         raise RuntimeError(f"empty split: {len(train)} train words, {len(held)} held-out words")
+
+    train_load = load_clip
+    if augment is not None:
+
+        def train_load(label: str, path: Path) -> np.ndarray:
+            return fixed_length(augment(load_clip(label, path)), SAMPLE_RATE)
+
     return (
-        EpisodicSampler(train, load_clip, seed=seed),
+        EpisodicSampler(train, train_load, seed=seed),
         EpisodicSampler(held, load_clip, seed=seed + 1),
     )

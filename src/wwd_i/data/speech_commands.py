@@ -11,6 +11,7 @@ by globbing and loaded with soundfile (see ``clips.py``), so the torchcodec/ffmp
 backend is not required. See docs/implementation-plan.md Phase 2.
 """
 
+from collections.abc import Callable
 from pathlib import Path
 
 from wwd_i.data.clips import index_clips, split_samplers
@@ -32,12 +33,17 @@ HELD_OUT_WORDS: tuple[str, ...] = (
 
 
 def speech_commands_samplers(
-    root: str | Path, *, limit: int | None = None, seed: int = 0
+    root: str | Path,
+    *,
+    limit: int | None = None,
+    seed: int = 0,
+    augment: Callable | None = None,
 ) -> tuple[EpisodicSampler, EpisodicSampler]:
     """Return (train_sampler, held_out_sampler) over Speech Commands v2.
 
     Downloads and extracts the dataset under ``root`` on first use (~2.3 GB).
     ``limit`` caps the clips kept per word (for a fast local smoke run).
+    ``augment`` (if given) perturbs training clips only; see ``split_samplers``.
     """
     import torchaudio
 
@@ -48,4 +54,4 @@ def speech_commands_samplers(
     index = index_clips(root)
     if not index:
         raise RuntimeError(f"no Speech Commands .wav files found under {root}")
-    return split_samplers(index, held_out_words=HELD_OUT_WORDS, limit=limit, seed=seed)
+    return split_samplers(index, held_out_words=HELD_OUT_WORDS, limit=limit, seed=seed, augment=augment)

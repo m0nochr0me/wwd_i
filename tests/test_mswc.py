@@ -48,3 +48,15 @@ def test_mswc_samplers_random_held_out(tmp_path):
     assert len(held.labels) == 2
     assert len(train.labels) == 4
     assert set(train.labels).isdisjoint(held.labels)
+
+
+def test_mswc_samplers_augment_train_only(tmp_path):
+    for w in range(6):
+        for k in range(8):
+            p = tmp_path / f"w{w}" / f"{k}.wav"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            sf.write(p, np.zeros(SAMPLE_RATE, dtype=np.float32), SAMPLE_RATE)
+
+    train, held = mswc_samplers(tmp_path, n_held_out=2, seed=0, augment=lambda w: w + 1.0)
+    assert np.allclose(train.episode(4, 1, 1).numpy(), 1.0)  # augment fired on training clips
+    assert np.allclose(held.episode(2, 1, 1).numpy(), 0.0)  # probe clips untouched

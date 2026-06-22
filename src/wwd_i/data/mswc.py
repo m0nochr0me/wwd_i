@@ -18,6 +18,7 @@ import argparse
 import hashlib
 import io
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -151,11 +152,17 @@ def prepare_mswc(
 
 
 def mswc_samplers(
-    root: str | Path, *, n_held_out: int = 50, limit: int | None = None, seed: int = 0
+    root: str | Path,
+    *,
+    n_held_out: int = 50,
+    limit: int | None = None,
+    seed: int = 0,
+    augment: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> tuple[EpisodicSampler, EpisodicSampler]:
     """Return (train_sampler, held_out_sampler) over a prepared MSWC directory.
 
     Reserves ``n_held_out`` random words (seeded) for the few-shot probe.
+    ``augment`` (if given) perturbs training clips only; see ``split_samplers``.
     """
     index = index_clips(root)
     if len(index) <= n_held_out:
@@ -163,7 +170,7 @@ def mswc_samplers(
     rng = np.random.default_rng(seed)
     words = sorted(index)
     held_out = [words[int(i)] for i in rng.choice(len(words), size=n_held_out, replace=False)]
-    return split_samplers(index, held_out_words=held_out, limit=limit, seed=seed)
+    return split_samplers(index, held_out_words=held_out, limit=limit, seed=seed, augment=augment)
 
 
 def main() -> None:
