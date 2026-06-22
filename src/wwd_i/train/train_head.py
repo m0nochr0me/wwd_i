@@ -31,11 +31,12 @@ import onnxruntime as ort
 from wwd_i.audio.io import load_wav
 from wwd_i.config import MEL_FRAMES_PER_FRAME, SAMPLE_RATE
 from wwd_i.data.augment import Augmenter
-from wwd_i.data.backgrounds import load_background_pool
+from wwd_i.data.backgrounds import find_audio, load_background_pool
 from wwd_i.data.clips import fixed_length
 from wwd_i.data.negatives import sample_background_clips
 from wwd_i.features.melspec import compute_logmel
 from wwd_i.models.head import HeadConfig, WakeHead, export_head_onnx
+from wwd_i.runtime.engine import WakeWordEngine
 
 WINDOW = 76  # mel frames fed to the backbone per hop (§3 rolling buffer ≈ 760 ms)
 CLIP_SECONDS = 1.5
@@ -161,6 +162,68 @@ def calibrate(prob: np.ndarray, y: np.ndarray, *, target_fa: float, target_fr: f
     return {"chosen": chosen, "det": det, "neg_hours": neg_hours}
 
 
+def _count_fires(times: np.ndarray, scores: np.ndarray, thr: float, refractory: float) -> int:
+    """Refractory-debounced threshold crossings — mirrors ``WakeWordEngine.push`` fire logic."""
+    last = float("-inf")
+    fires = 0
+    for t, s in zip(times, scores, strict=True):
+        if s >= thr and (t - last) >= refractory:
+            fires += 1
+            last = float(t)
+    return fires
+
+
+def calibrate_stream(
+    engine: WakeWordEngine,
+    neg_paths: list[Path],
+    pos_paths: list[Path],
+    *,
+    target_fa: float,
+    target_fr: float,
+    refractory: float,
+) -> dict:
+    """Calibrate by running the actual streaming engine, not isolated clips.
+
+    The runtime scores a sliding window every 80 ms and debounces fires by
+    ``refractory`` seconds; ``calibrate`` (one max-over-time score per 1.5 s clip)
+    ignores that cadence and under-counts FA. Here we stream continuous negative
+    recordings and the positive clips through ``engine`` once — it is built with
+    threshold 0 and zero refractory so ``push`` returns *every* hop — then sweep
+    thresholds offline applying the real refractory debounce. FA/hr is fires over the
+    true negative audio duration; FR is the fraction of positive utterances that never
+    fire. Same return shape as ``calibrate`` so the reporting/gate code is shared.
+    """
+    if not neg_paths:
+        raise RuntimeError("calibrate_stream: no negative audio files")
+    neg_streams: list[np.ndarray] = []  # per file: [hops, 2] = (time_s, score)
+    neg_seconds = 0.0
+    for p in neg_paths:
+        wav = load_wav(p)
+        neg_seconds += len(wav) / SAMPLE_RATE
+        engine.reset()
+        dets = engine.push(wav)
+        neg_streams.append(np.array([[d.time_s, d.score] for d in dets], dtype=np.float64).reshape(-1, 2))
+
+    pos_best: list[float] = []
+    for p in pos_paths:
+        engine.reset()
+        dets = engine.push(load_wav(p))
+        pos_best.append(max((d.score for d in dets), default=0.0))
+    pos = np.array(pos_best, dtype=np.float64)
+    neg_hours = neg_seconds / 3600.0
+
+    det = []
+    for thr in _THRESHOLDS:
+        fr = float(np.mean(pos < thr)) if len(pos) else 1.0
+        fa = sum(_count_fires(s[:, 0], s[:, 1], float(thr), refractory) for s in neg_streams)
+        fa_per_hr = fa / neg_hours if neg_hours else 0.0
+        det.append({"threshold": round(float(thr), 3), "fr": fr, "fa_per_hr": fa_per_hr, "fa": fa})
+    feasible = [r for r in det if r["fa_per_hr"] < target_fa]
+    chosen = min(feasible, key=lambda r: r["fr"]) if feasible else max(det, key=lambda r: r["threshold"])
+    chosen["passed"] = bool(chosen["fa_per_hr"] < target_fa and chosen["fr"] < target_fr)
+    return {"chosen": chosen, "det": det, "neg_hours": neg_hours}
+
+
 def _fit(head: WakeHead, x: torch.Tensor, y: torch.Tensor, tr: np.ndarray, val: np.ndarray, args) -> None:
     """Train in place, keeping the best-val-loss weights (early-stopping-style).
 
@@ -213,12 +276,28 @@ def train(args: argparse.Namespace) -> None:
     _fit(head, x, y, tr, val, args)
 
     head.eval()
-    with torch.no_grad():
-        test_prob = torch.sigmoid(head.clip_logits(x[test])).cpu().numpy()
-    result = calibrate(test_prob, y[test].cpu().numpy(), target_fa=args.target_fa, target_fr=args.target_fr)
+    export_head_onnx(head, args.out)  # export first: streaming calibration loads this head
+
+    if args.calib_bg:
+        neg_paths = find_audio(args.calib_bg)
+        if not neg_paths:
+            raise RuntimeError(f"--calib-bg has no audio files under {args.calib_bg}")
+        pos_paths = sorted(Path(args.positives).rglob("*.wav"))
+        # threshold 0 + zero refractory => push() returns every hop; calibrate_stream
+        # re-thresholds offline with the real --refractory.
+        engine = WakeWordEngine(args.out, threshold=0.0, refractory_s=0.0)
+        result = calibrate_stream(
+            engine, neg_paths, pos_paths, target_fa=args.target_fa, target_fr=args.target_fr, refractory=args.refractory
+        )
+        calib_label = f"streaming, {result['neg_hours']:.2f} h continuous negatives ({len(neg_paths)} files)"
+    else:
+        with torch.no_grad():
+            test_prob = torch.sigmoid(head.clip_logits(x[test])).cpu().numpy()
+        result = calibrate(test_prob, y[test].cpu().numpy(), target_fa=args.target_fa, target_fr=args.target_fr)
+        calib_label = f"held-out test, {result['neg_hours']:.2f} h negatives"
 
     c = result["chosen"]
-    print(f"\nDET (held-out test, {result['neg_hours']:.2f} h negatives):")
+    print(f"\nDET ({calib_label}):")
     for r in result["det"]:
         mark = "  <-- chosen" if r is c else ""
         print(f"  thr {r['threshold']:.3f} | FR {r['fr']:.3f} | FA {r['fa_per_hr']:.2f}/hr{mark}")
@@ -227,8 +306,6 @@ def train(args: argparse.Namespace) -> None:
         f"\n[gate] thr {c['threshold']:.3f} -> FA {c['fa_per_hr']:.2f}/hr, FR {c['fr']:.3f} "
         f"(targets FA<{args.target_fa}/hr, FR<{args.target_fr}) {verdict}"
     )
-
-    export_head_onnx(head, args.out)
     meta = {
         "word": args.word,
         "threshold": c["threshold"],
@@ -248,6 +325,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--positives", required=True, help="dir of wake-phrase wavs (ElevenLabs)")
     p.add_argument("--hard-neg", help="dir of near-phrase wavs (ElevenLabs hard negatives)")
     p.add_argument("--background", nargs="*", help="dirs of background audio for augmentation noise (e.g. noise_pool)")
+    p.add_argument(
+        "--calib-bg",
+        nargs="+",
+        help="dirs of HELD-OUT continuous negative audio: calibrate FA/hr by streaming it through the real "
+        "engine (sliding window + refractory) instead of the per-clip estimate. Hold out from training negatives.",
+    )
     p.add_argument(
         "--bg-neg-emb", help="pre-embedded background negatives .npy from preprocess_bg (bypasses --n-bg-neg)"
     )
