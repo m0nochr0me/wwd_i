@@ -55,6 +55,10 @@ def split_samplers(
     ``limit`` caps clips kept per word (for fast runs). ``augment`` (if given) is
     applied to **training** clips only — the probe must stay clean — and its
     length-changing output (speed-perturb) is re-fixed to one clip length.
+
+    Decoded clips are cached in RAM: the per-step episode redraws the same clips
+    thousands of times, so re-decoding from disk every draw is pure waste. The
+    cache is bounded by the prepared subset (held/train paths are disjoint).
     """
     if limit is not None:
         index = {word: paths[:limit] for word, paths in index.items()}
@@ -64,13 +68,22 @@ def split_samplers(
     if not train or not held:
         raise RuntimeError(f"empty split: {len(train)} train words, {len(held)} held-out words")
 
-    train_load = load_clip
+    cache: dict[Path, np.ndarray] = {}
+
+    def cached_load(label: str, path: Path) -> np.ndarray:
+        clip = cache.get(path)
+        if clip is None:
+            clip = load_clip(label, path)
+            cache[path] = clip
+        return clip
+
+    train_load = cached_load
     if augment is not None:
 
         def train_load(label: str, path: Path) -> np.ndarray:
-            return fixed_length(augment(load_clip(label, path)), SAMPLE_RATE)
+            return fixed_length(augment(cached_load(label, path)), SAMPLE_RATE)
 
     return (
         EpisodicSampler(train, train_load, seed=seed),
-        EpisodicSampler(held, load_clip, seed=seed + 1),
+        EpisodicSampler(held, cached_load, seed=seed + 1),
     )

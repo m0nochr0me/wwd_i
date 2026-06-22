@@ -18,12 +18,12 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from wwd_i.data.augment import Augmenter
 from wwd_i.data.backgrounds import load_background_pool
 from wwd_i.data.mswc import mswc_samplers
 from wwd_i.data.speech_commands import speech_commands_samplers
 from wwd_i.features.melspec import MelSpectrogram
 from wwd_i.models.backbone import Backbone, BackboneConfig, export_onnx
+from wwd_i.train.gpu_augment import GPUAugmenter
 from wwd_i.train.probe import few_shot_probe
 from wwd_i.train.proto import prototypical_loss
 
@@ -36,25 +36,25 @@ def train(args: argparse.Namespace) -> None:
     model = Backbone(BackboneConfig(embedding_dim=args.embedding_dim)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    augment = None
+    gpu_augment = None
     if args.augment:
         pool = (
             load_background_pool(args.aug_bg_dir, max_clips=args.aug_max_bg, seed=args.seed) if args.aug_bg_dir else []
         )
-        # p_gain=0: a constant gain is already a no-op for this backbone — it z-score
-        # normalizes every window (models/backbone._normalize_window), so gain carries no
-        # signal. The augmentations that survive normalization are reverb, speed, noise, clip.
-        augment = Augmenter(pool, p_gain=0.0, seed=args.seed)
-        print(f"augment ON | noise pool {len(pool)} clips | reverb+speed+noise+clip (gain skipped)")
+        # Augment on the GPU, batched (the backbone is tiny; per-clip CPU augmentation
+        # starved the GPU). p_gain=0: a constant gain is already a no-op for this backbone
+        # — it z-score normalizes every window (models/backbone._normalize_window), so gain
+        # carries no signal. The augmentations that survive normalization are speed, reverb,
+        # noise, clip.
+        gpu_augment = GPUAugmenter(pool, device=device, p_gain=0.0, seed=args.seed)
+        print(f"augment ON (GPU) | noise pool {len(pool)} clips | speed+reverb+noise+clip (gain skipped)")
 
     if args.dataset == "mswc":
         train_sampler, held_sampler = mswc_samplers(
-            args.root, n_held_out=args.mswc_held_out, limit=args.limit, seed=args.seed, augment=augment
+            args.root, n_held_out=args.mswc_held_out, limit=args.limit, seed=args.seed
         )
     else:
-        train_sampler, held_sampler = speech_commands_samplers(
-            args.root, limit=args.limit, seed=args.seed, augment=augment
-        )
+        train_sampler, held_sampler = speech_commands_samplers(args.root, limit=args.limit, seed=args.seed)
 
     def embed(audio: Tensor) -> Tensor:
         return model(melspec(audio))
@@ -66,6 +66,8 @@ def train(args: argparse.Namespace) -> None:
     for step in range(1, args.steps + 1):
         model.train()
         audio = train_sampler.episode(args.n_way, args.k_shot, args.q_query).to(device)
+        if gpu_augment is not None:
+            audio = gpu_augment(audio)
         loss, acc = prototypical_loss(model(melspec(audio)), args.n_way, args.k_shot, args.q_query)
         optimizer.zero_grad()
         loss.backward()
