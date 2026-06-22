@@ -35,15 +35,27 @@ def test_write_pool_max_stream_caps_consultations(tmp_path):
     assert kept == 2  # only the first 2 examples consulted
 
 
+def _flac(seconds: float) -> bytes:
+    buf = io.BytesIO()
+    sf.write(buf, np.zeros(int(seconds * SAMPLE_RATE), dtype=np.float32), SAMPLE_RATE, format="FLAC")
+    return buf.getvalue()
+
+
 def test_write_pool_decodes_raw_bytes_under_custom_key(tmp_path):
     # WebDataset (e.g. 0x3/vocal-bursts) yields FLAC bytes directly, not a {bytes|path} dict.
-    buf = io.BytesIO()
-    sf.write(buf, np.zeros(SAMPLE_RATE, dtype=np.float32), SAMPLE_RATE, format="FLAC")
-    examples = [{"flac": buf.getvalue()}]
+    examples = [{"flac": _flac(1.0)}]
     kept, skipped = _write_pool(examples, tmp_path, n_clips=10, audio_key="flac", min_seconds=0.4, max_stream=0)
     assert (kept, skipped) == (1, 0)
 
 
-def test_write_pool_wrong_audio_key_raises(tmp_path):
-    with pytest.raises(KeyError):  # surfaces a bad --audio-key instead of skipping every clip
-        _write_pool([_ex(1.0)], tmp_path, n_clips=1, audio_key="flac", min_seconds=1.0, max_stream=0)
+def test_write_pool_auto_detects_audio_column(tmp_path):
+    # The real B4 failure: audio is under `flac` but the caller passed the default --audio-key audio.
+    examples = [{"flac": _flac(1.0), "__key__": "a", "json": {"label": "cough"}}]
+    kept, skipped = _write_pool(examples, tmp_path, n_clips=10, audio_key="audio", min_seconds=0.4, max_stream=0)
+    assert (kept, skipped) == (1, 0)  # resolves to `flac` instead of crashing on KeyError: 'audio'
+
+
+def test_write_pool_raises_when_no_audio_column(tmp_path):
+    examples = [{"__key__": "a", "json": {"label": "cough"}}]
+    with pytest.raises(KeyError):  # genuinely no audio anywhere -> clear, key-listing error
+        _write_pool(examples, tmp_path, n_clips=1, audio_key="audio", min_seconds=0.4, max_stream=0)
