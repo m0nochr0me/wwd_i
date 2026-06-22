@@ -16,7 +16,7 @@ from time import perf_counter
 import numpy as np
 
 from wwd_i.audio import file_frames, mic_frames
-from wwd_i.config import FRAME_MS
+from wwd_i.config import FRAME_MS, SAMPLE_RATE
 from wwd_i.export import build_identity_model
 from wwd_i.runtime import WakeWordEngine, load_session, run_stream
 
@@ -37,7 +37,10 @@ def _run_detect(args: argparse.Namespace) -> int:
         f"refractory {engine.refractory_s:.2f}s){' — Ctrl-C to stop' if args.mic else ''}"
     )
 
+    report_every = max(1, round(1000 / FRAME_MS))  # ~1 s of frames between --debug lines
+    captured: list[np.ndarray] = []
     count, compute, total = 0, 0.0, 0
+    win_score, win_rms = 0.0, 0.0  # running maxima since the last --debug report
     try:
         for frame in frames:
             t0 = perf_counter()
@@ -47,9 +50,23 @@ def _run_detect(args: argparse.Namespace) -> int:
             for d in dets:
                 total += 1
                 print(f"  \N{HIGH VOLTAGE SIGN} {engine.word!r} @ {d.time_s:6.2f}s  score={d.score:.3f}")
+            if args.save is not None:
+                captured.append(np.asarray(frame, dtype=np.float32))
+            if args.debug:
+                win_score = max(win_score, engine.last_score)
+                win_rms = max(win_rms, float(np.sqrt(np.mean(np.square(frame, dtype=np.float64)))))
+                if count % report_every == 0:
+                    dbfs = 20 * np.log10(win_rms + 1e-9)
+                    print(f"  [debug] input {dbfs:6.1f} dBFS  max P(wake)={win_score:.3f}")
+                    win_score, win_rms = 0.0, 0.0
     except KeyboardInterrupt:  # pragma: no cover - interactive
         print("\nstopped")
-        return 0
+    finally:
+        if args.save is not None and captured:
+            import soundfile as sf
+
+            sf.write(args.save, np.concatenate(captured), SAMPLE_RATE)
+            print(f"saved {len(captured) * FRAME_MS / 1000:.2f}s of captured audio to {args.save}")
 
     audio_ms = count * FRAME_MS
     rtf = (compute * 1000.0 / audio_ms) if audio_ms else 0.0
@@ -100,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--no-normalize", action="store_true", help="disable input loudness normalization (AGC) — for A/B debugging"
     )
+    parser.add_argument(
+        "--debug", action="store_true", help="print input level (dBFS) and max P(wake) ~once/sec, even below threshold"
+    )
+    parser.add_argument("--save", type=Path, help="write captured audio to this wav on exit (for offline replay)")
     args = parser.parse_args(argv)
 
     if args.mic == bool(args.source):
