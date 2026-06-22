@@ -33,3 +33,17 @@ def test_write_pool_max_stream_caps_consultations(tmp_path):
     examples = [_ex(1.0) for _ in range(10)]
     kept, _ = _write_pool(examples, tmp_path, n_clips=10, audio_key="audio", min_seconds=1.0, max_stream=2)
     assert kept == 2  # only the first 2 examples consulted
+
+
+def test_write_pool_decodes_raw_bytes_under_custom_key(tmp_path):
+    # WebDataset (e.g. 0x3/vocal-bursts) yields FLAC bytes directly, not a {bytes|path} dict.
+    buf = io.BytesIO()
+    sf.write(buf, np.zeros(SAMPLE_RATE, dtype=np.float32), SAMPLE_RATE, format="FLAC")
+    examples = [{"flac": buf.getvalue()}]
+    kept, skipped = _write_pool(examples, tmp_path, n_clips=10, audio_key="flac", min_seconds=0.4, max_stream=0)
+    assert (kept, skipped) == (1, 0)
+
+
+def test_write_pool_wrong_audio_key_raises(tmp_path):
+    with pytest.raises(KeyError):  # surfaces a bad --audio-key instead of skipping every clip
+        _write_pool([_ex(1.0)], tmp_path, n_clips=1, audio_key="flac", min_seconds=1.0, max_stream=0)

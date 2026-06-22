@@ -24,17 +24,27 @@ from wwd_i.config import SAMPLE_RATE
 from wwd_i.data.mswc import _decode_16k_mono  # shared HF-audio decode (soundfile + soxr)
 
 
-def _stream(dataset: str, config: str | None, split: str, *, audio_key: str = "audio"):
-    """Streaming HF dataset with ``audio_key`` left undecoded ({bytes|path})."""
+def _stream(dataset: str, config: str | None, split: str):
+    """Streaming HF dataset with its declared feature schema dropped (raw columns).
+
+    We decode the audio bytes ourselves (soundfile + soxr), so the declared schema is
+    unnecessary — and on WebDataset corpora it is actively harmful: ``0x3/vocal-bursts``
+    stores FLAC bytes under a ``flac`` column while its metadata declares an ``audio``
+    column, so ``datasets`` raises ``CastError`` mid-stream casting each shard to the
+    mismatched features. Setting ``info.features = None`` skips that cast; iteration then
+    yields the physical columns ({bytes|path} dict for parquet Audio, raw bytes for
+    WebDataset members). Dropping the schema also avoids datasets' librosa-based Audio
+    decoder (no py3.14 wheel). Pick the audio column with ``--audio-key`` (``--inspect``
+    lists the columns).
+    """
     import datasets
 
     from wwd_i.data._datasets_compat import patch_datasets_py314
 
     patch_datasets_py314()  # py3.14: fix datasets' _batch_setitems fingerprint override
     ds = datasets.load_dataset(dataset, config, split=split, streaming=True)
-    # Decode ourselves (soundfile + soxr); datasets' Audio decoder pulls librosa/numba
-    # (no py3.14 wheel). decode=False yields {bytes|path}, which _decode_16k_mono handles.
-    return ds.cast_column(audio_key, datasets.Audio(decode=False))
+    ds.info.features = None
+    return ds
 
 
 def _write_pool(
@@ -58,8 +68,10 @@ def _write_pool(
     for i, example in enumerate(examples):
         if kept >= n_clips or (max_stream and i >= max_stream):
             break
+        raw = example[audio_key]  # KeyError here = wrong --audio-key (see --inspect), not corruption
         try:
-            wav = _decode_16k_mono(example[audio_key])
+            # WebDataset members arrive as raw bytes; parquet Audio as a {bytes|path} dict.
+            wav = _decode_16k_mono(raw if isinstance(raw, dict) else {"bytes": raw})
         except Exception:
             skipped += 1  # corrupt / unsupported codec
             continue
@@ -91,7 +103,7 @@ def prepare_audio_pool(
     is a windowed (``buffer_size``) shuffle over the stream, not a uniform draw over the
     full corpus — ``seed`` makes it reproducible. Returns the count written.
     """
-    stream = _stream(dataset, config, split, audio_key=audio_key).shuffle(seed=seed, buffer_size=buffer_size)
+    stream = _stream(dataset, config, split).shuffle(seed=seed, buffer_size=buffer_size)
     kept, skipped = _write_pool(
         stream, out, n_clips=n_clips, audio_key=audio_key, min_seconds=min_seconds, max_stream=max_stream
     )
@@ -105,14 +117,16 @@ def inspect_pool(
     dataset: str, *, config: str | None = None, split: str = "train", audio_key: str = "audio", n: int = 1
 ) -> None:
     """Print the fields of the first ``n`` streamed examples and decode one clip."""
-    stream = _stream(dataset, config, split, audio_key=audio_key)
+    stream = _stream(dataset, config, split)
     for i, example in enumerate(stream):
         if i >= n:
             break
         print(f"keys = {list(example.keys())}")
         audio = example.get(audio_key)
+        if isinstance(audio, (bytes, bytearray)):
+            audio = {"bytes": audio}  # WebDataset member (e.g. flac); parquet Audio is already a dict
         if not isinstance(audio, dict):
-            print(f"  no dict under {audio_key!r}; pick the audio column from the keys above via --audio-key")
+            print(f"  no audio under {audio_key!r}; pick the audio column from the keys above via --audio-key")
             continue
         print(f"  audio fields = {list(audio.keys())}, bytes={'yes' if audio.get('bytes') else 'no'}")
         try:
