@@ -1,5 +1,14 @@
 ---
 repos:
+  # Keep each Colab notebook (.ipynb) and its py:percent script in lockstep; runs
+  # before ruff so an edit on either side is synced before the .ipynb is linted.
+  - repo: https://github.com/mwouts/jupytext
+    rev: v1.19.4
+    hooks:
+      - id: jupytext
+        args: [--sync]
+        files: ^notebooks/.*\.(ipynb|py)$
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.17
     hooks:

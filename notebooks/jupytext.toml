@@ -1,0 +1,9 @@
+# Pair every notebook in this directory as an .ipynb <-> a py:percent script of the
+# same name. Edit/review the .py ("as code": real diffs, cell markers); the .ipynb is
+# the artifact you open in Colab. `jupytext --sync notebooks/<name>.{py,ipynb}` (run by
+# the pre-commit hook) propagates an edit on either side to its pair.
+#
+# Shell magics (!cmd, %cd) are commented in the .py to keep it textual, so a whole
+# if/else branch of magics becomes an empty block -> the .py is NOT parseable Python.
+# ruff lints the .ipynb (notebook-aware); notebooks/*.py is ruff-excluded in pyproject.
+formats = "ipynb,py:percent"

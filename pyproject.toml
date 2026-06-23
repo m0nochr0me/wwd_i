@@ -36,6 +36,7 @@ torchaudio = { index = "pytorch-cpu" }
 [dependency-groups]
 dev = [
     "ipykernel>=7.3.0",
+    "jupytext>=1.19",  # pair the Colab notebooks with py:percent scripts (notebooks/jupytext.toml)
     "pre-commit>=4.6.0",
     "pytest>=9.1.0",
     "ruff>=0.15.17",
@@ -80,6 +81,9 @@ exclude = [
     "site-packages",
     "venv",
 ]
+# Paired jupytext scripts: a percent .py with shell magics commented out leaves empty
+# if/else blocks -> not parseable as Python. Lint the .ipynb (ruff is notebook-aware) instead.
+extend-exclude = ["notebooks/*.py"]
 line-length = 120
 target-version = "py314"
 
