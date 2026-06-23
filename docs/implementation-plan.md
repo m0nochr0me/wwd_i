@@ -19,7 +19,7 @@ Lay down structure and prove we can stream audio through an (empty) ONNX pipelin
       features/   # mel front-end (torch + onnx)
       models/     # backbone, head definitions
       train/      # backbone & head training loops
-      data/       # sample gen (ElevenLabs), augmentation, datasets
+      data/       # sample gen (pluggable TTS), augmentation, datasets
       runtime/    # streaming inference engine, post-processing
       export/     # onnx export + quantization
     docs/
@@ -59,8 +59,8 @@ Build and train the reusable frozen embedding model. **Highest-risk phase.**
 ## Phase 3 — Data generation & augmentation (per word)
 Streamlined, high-quality, few-sample positives + a strong negative pipeline.
 
-- 🎯 ElevenLabs v3 sample generator: phrase → diverse clips (voices/accents/prosody),
-  cached, deduped, loudness-normalized.
+- 🎯 TTS sample generator: phrase → diverse clips (voices/accents/prosody),
+  cached, deduped, loudness-normalized. Pluggable backend (`data/tts.py`).
 - 🎯 Hard-negative generation (near phrases / sub-phrases) + background negative
   loaders (speech/music/noise corpora).
 - 🎯 On-the-fly augmentation: RIR, additive noise/music at varied SNR, gain,

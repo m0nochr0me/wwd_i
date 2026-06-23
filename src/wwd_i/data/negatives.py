@@ -4,7 +4,7 @@ Two kinds, per docs/architecture.md §7:
 
 - **Hard negatives** — phrases acoustically near the wake phrase (its own
   sub-words plus a few generic commands/fillers), synthesized with the same
-  ElevenLabs path as the positives. A starting set; extend per word as FA shows.
+  TTS path as the positives. A starting set; extend per word as FA shows.
 - **Background negatives** — random fixed-length crops of generic audio
   (speech/music/noise) from the background pool, labelled "not the wake word".
 """

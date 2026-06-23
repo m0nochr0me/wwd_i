@@ -55,7 +55,7 @@ pip install wwd-i
 ```
 
 That pulls only `numpy`, `onnx`, `onnxruntime`, `soundfile`, `soxr`. The
-training/export/notebook stack (`torch`, `datasets`, `elevenlabs`, …) lives in
+training/export/notebook stack (`torch`, `datasets`, a TTS backend, …) lives in
 the `train` dependency group and is never needed to run detection.
 
 **Microphone capture is optional.** `wwd_i.audio.mic_frames` needs
@@ -411,6 +411,7 @@ Things that won't raise an error but will quietly break detection if ignored:
 
 - [architecture.md](architecture.md) — design and rationale.
 - [implementation-plan.md](implementation-plan.md) — build phases.
+- [data-licensing.md](data-licensing.md) — code/model licenses and head-data terms.
 - `src/wwd_i/config.py` — the audio/mel contract, single source of truth.
 - `src/wwd_i/runtime/engine.py` — the engine, with the streaming invariants
   documented inline.

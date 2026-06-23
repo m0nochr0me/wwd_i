@@ -6,7 +6,7 @@ repos:
     rev: v1.19.4
     hooks:
       - id: jupytext
-        args: ["--to notebook", --update]
+        args: ["--to", "notebook", "--update"]
         files: ^notebooks/.*\.py$
 
   - repo: https://github.com/astral-sh/ruff-pre-commit

@@ -1,0 +1,29 @@
+wwd_i
+Copyright (c) 2026 m0nochr0me
+
+This product is licensed under the MIT License (see LICENSE).
+It also includes or depends on third-party components, noted below.
+Full details: docs/data-licensing.md.
+
+Bundled native libraries (LGPL-2.1-or-later)
+--------------------------------------------
+Loaded dynamically via their Python wheels; not statically linked into wwd_i,
+so their LGPL obligations stay contained to those packages.
+
+  - libsndfile — bundled by the `soundfile` package (LGPL-2.1-or-later)
+      https://github.com/libsndfile/libsndfile
+  - libsoxr    — bundled by the `soxr` package (LGPL-2.1-or-later)
+      https://sourceforge.net/projects/soxr/
+
+  If you redistribute a frozen or statically-linked binary that includes these
+  libraries, include their license texts and provide a way to relink them.
+
+Shipped model weights
+---------------------
+  - src/wwd_i/models/backbone.onnx is trained on the Multilingual Spoken Words
+    Corpus (MSWC), licensed CC-BY 4.0.
+      "Multilingual Spoken Words Corpus", MLCommons — CC-BY 4.0.
+      https://mlcommons.org/en/multilingual-spoken-words/
+
+Per-word heads that you train yourself carry the terms of whatever TTS and
+negative-audio sources you use; see docs/data-licensing.md.

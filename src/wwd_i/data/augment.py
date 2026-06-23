@@ -1,6 +1,6 @@
 """On-the-fly waveform augmentation for head training (Phase 3).
 
-Clean ElevenLabs TTS positives are too easy; real audio is reverberant, noisy,
+Clean TTS positives are too easy; real audio is reverberant, noisy,
 and recorded at varied gains. This applies, per call, a random subset of: gain,
 speed-perturb (joint tempo+pitch, Kaldi-style), reverberation via a synthetic
 room impulse response, additive background at a sampled SNR, and clipping.

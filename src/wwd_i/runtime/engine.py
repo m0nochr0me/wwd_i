@@ -55,7 +55,7 @@ HEAD_CONTEXT_HOPS = 10
 
 # Loudness normalization (AGC). The frozen backbone is strongly loudness-sensitive
 # — a -12 dB input level drop already halves the embedding's cosine similarity, and
-# heads are trained/calibrated on -20 dBFS audio (data.elevenlabs._rms_normalize) — so
+# heads are trained/calibrated on -20 dBFS audio (data.tts.rms_normalize) — so
 # raw, quiet mic input lands off the trained manifold and the head's output is arbitrary.
 # This pulls the input back toward the training level before the mel front-end.
 AGC_TARGET_RMS = 0.1  # -20 dBFS, matches the head-training normalization target

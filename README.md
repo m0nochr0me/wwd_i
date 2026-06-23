@@ -75,12 +75,16 @@ for the full runtime API, the audio contract, and deployment notes.
 
 ## Training
 
-Words are trained on Google Colab GPU (ElevenLabs v3 TTS positives + mined
-negatives), then exported to ONNX. Install the training stack with
-`uv sync --group train`; see the notebooks under `notebooks/` and the design docs.
+Words are trained on Google Colab GPU (high-quality TTS positives + mined
+negatives), then exported to ONNX. The TTS backend is pluggable
+(`src/wwd_i/data/tts.py`) — prefer a permissively-licensed local TTS so the
+pipeline stays license-clean; see [data licensing](docs/data-licensing.md).
+Install the training stack with `uv sync --group train`; see the notebooks under
+`notebooks/` and the design docs.
 
 ## Docs
 
 - [Integration guide](docs/integration-guide.md) — embed it: install, API, gotchas.
 - [Architecture & design](docs/architecture.md)
 - [Phased implementation plan](docs/implementation-plan.md)
+- [Licensing & data provenance](docs/data-licensing.md) — code/model licenses, head-data terms.

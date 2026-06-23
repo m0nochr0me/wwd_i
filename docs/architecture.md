@@ -23,7 +23,7 @@ technology and a streamlined, high-quality training process.
 - CPU-only inference on Linux **x86_64** and **ARM64**, tuned for a modern
   single-board server (RPi5 class: Cortex-A76, NEON, no usable NPU).
 - A reusable, frozen **backbone** so adding a new wake word only trains a small head.
-- Training that uses **few but high-quality** ElevenLabs v3 samples + augmentation.
+- Training that uses **few but high-quality** TTS samples + augmentation.
 
 **Non-goals (for now)**
 
@@ -178,7 +178,7 @@ Size ~50–200 KB.
 
 | Class                    | Source                                                                                      | Notes                                                                                       |
 | ------------------------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| **Positives**            | **ElevenLabs v3** TTS of the wake phrase                                                    | few but high-diversity: voices, accents, prosody/emotion. Target order ~1–5k clips, not 50k |
+| **Positives**            | **high-quality TTS** of the wake phrase                                                     | few but high-diversity: voices, accents, prosody/emotion. Target order ~1–5k clips, not 50k |
 | **Hard negatives**       | phonetically near phrases, sub-phrases, rhymes                                              | mine + TTS; critical for low FA                                                             |
 | **Background negatives** | speech (Common Voice/LibriSpeech), music & noise (AudioSet/MUSAN)                           | large, generic                                                                              |
 | **Augmentation**         | RIR convolution, additive noise/music at varied SNR, gain, pitch/time/speed, codec/clipping | applied on-the-fly during head training                                                     |
@@ -216,7 +216,7 @@ TTS + augmentation.
 | Language / pkg | Python 3.14, `uv`                                            |
 | Training       | PyTorch + `torchaudio`, on **Google Colab** GPU; export ONNX |
 | Inference      | ONNX Runtime (CPU EP)                                        |
-| Sample gen     | ElevenLabs v3 API                                            |
+| Sample gen     | pluggable TTS backend                                        |
 | Target HW      | Linux x86_64 + ARM64 (RPi5 class)                            |
 
 ## 10. Evaluation targets

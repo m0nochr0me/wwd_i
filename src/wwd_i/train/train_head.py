@@ -1,6 +1,6 @@
 """Train a per-word wake head on frozen embeddings (Phase 4 driver).
 
-Pipeline: ElevenLabs positives (+ hard negatives) and background negatives
+Pipeline: TTS positives (+ hard negatives) and background negatives
 (speech/music/noise) → on-the-fly-style augmentation baked into K variants → the
 **frozen** ``backbone.onnx`` turns each ~1.5 s clip into an embedding sequence →
 a tiny streaming GRU head is trained with max-over-time BCE → threshold is
@@ -323,8 +323,8 @@ def train(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Train a per-word wake head on frozen embeddings (Phase 4).")
     p.add_argument("--word", default="wake", help="label for the calibration metadata")
-    p.add_argument("--positives", required=True, help="dir of wake-phrase wavs (ElevenLabs)")
-    p.add_argument("--hard-neg", help="dir of near-phrase wavs (ElevenLabs hard negatives)")
+    p.add_argument("--positives", required=True, help="dir of wake-phrase wavs (TTS)")
+    p.add_argument("--hard-neg", help="dir of near-phrase wavs (TTS hard negatives)")
     p.add_argument("--background", nargs="*", help="dirs of background audio for augmentation noise (e.g. noise_pool)")
     p.add_argument(
         "--calib-bg",

@@ -15,13 +15,13 @@
 # %% [markdown]
 # # wwd_i — Phases 3-4: train a wake-word head on Colab
 #
-# Generates per-word data with **ElevenLabs v3**, embeds it through the **frozen `backbone.onnx`** already in the repo, trains a tiny **streaming GRU head**, calibrates the threshold to **FA < 0.5/hr & FR < 5%**, and exports `<word>_head.onnx`.
+# Generates per-word data with a **TTS backend** (the ElevenLabs path is opt-in — see Part A), embeds it through the **frozen `backbone.onnx`** already in the repo, trains a tiny **streaming GRU head**, calibrates the threshold to **FA < 0.5/hr & FR < 5%**, and exports `<word>_head.onnx`.
 #
 # Change `WAKE_WORD` and re-run to train a different word — the backbone is reused; only the head is retrained. Each word's data and head are backed up under its own slug on Drive, so different wake words don't collide.
 #
-# A **GPU is optional but recommended**: the heavy step is embedding tens of thousands of background crops through the backbone, which runs on the GPU via `onnxruntime-gpu` (installed automatically in step 4 when a GPU is present) — without one it falls back to CPU. Add your **`ELEVENLABS_API_KEY`** to **Colab Secrets** (🔑 left sidebar); it's read in step 6.
+# A **GPU is optional but recommended**: the heavy step is embedding tens of thousands of background crops through the backbone, which runs on the GPU via `onnxruntime-gpu` (installed automatically in step 4 when a GPU is present) — without one it falls back to CPU. Generating positives is opt-in (Part A): wire a permissively-licensed local TTS, or use the ElevenLabs path by adding **`ELEVENLABS_API_KEY`** to **Colab Secrets** (🔑 left sidebar).
 #
-# **Runtime crash-safe:** data and the preprocessed background cache are mirrored to Google Drive and auto-restored (step 5), so a disconnect doesn't cost you the ElevenLabs spend or a multi-GB re-download.
+# **Runtime crash-safe:** data and the preprocessed background cache are mirrored to Google Drive and auto-restored (step 5), so a disconnect doesn't cost you the TTS spend or a multi-GB re-download.
 
 # %% [markdown]
 # ### 1. (optional) GPU
@@ -73,7 +73,7 @@ os.chdir("/content")  # chdir to root before deleting
 # !.venv/bin/python --version
 
 # %% [markdown]
-# ### 4. Install torch + the package + the ElevenLabs SDK
+# ### 4. Install torch + the package + training extras
 #
 # `--torch-backend=auto` picks a CUDA torch wheel if a GPU is present, else CPU. On a
 # GPU runtime the cell then swaps the CPU `onnxruntime` for **`onnxruntime-gpu`** so the
@@ -131,7 +131,7 @@ else:
 #
 # Mounts Drive and fixes a **consistent data dir at `/content/data`** (outside the repo, so re-running the clone cell never wipes it). `restore(name)` pulls an artifact back from Drive if a previous run saved it; `backup(name)` mirrors it out.
 #
-# Word-specific artifacts (positives, hard-negatives, the trained head) are namespaced under the wake word's slug — `MyDrive/wwd_i/<slug>/…` — so training a **different** wake word never overwrites or wrongly restores another's. The word-**independent** background cache (`bg_neg.npy`, `noise_pool`) is saved once with `shared=True` at the top level and reused for every word. The expensive things — ElevenLabs clips (cost money) and the preprocessed cache — are saved once and restored instantly if the runtime dies.
+# Word-specific artifacts (positives, hard-negatives, the trained head) are namespaced under the wake word's slug — `MyDrive/wwd_i/<slug>/…` — so training a **different** wake word never overwrites or wrongly restores another's. The word-**independent** background cache (`bg_neg.npy`, `noise_pool`) is saved once with `shared=True` at the top level and reused for every word. The expensive things — TTS clips and the preprocessed cache — are saved once and restored instantly if the runtime dies.
 
 # %%
 # --- Google Drive persistence: consistent data dir + per-word restore/backup ---
@@ -191,7 +191,7 @@ print("DATA =", DATA, "| DRIVE =", DRIVE)
 # %% [markdown]
 # ### 6. Configure — wake word + API key
 #
-# Set the wake word here. The **`ELEVENLABS_API_KEY`** is read from **Colab Secrets** (🔑 in the left sidebar) via `userdata.get` — add it there once and grant this notebook access; it's never pasted into the notebook or written to disk. The slug derived from the wake word keys this run's per-word Drive backups (step 5).
+# Set the wake word here. The TTS backend is opt-in (Part A): to use the ElevenLabs path, add **`ELEVENLABS_API_KEY`** to **Colab Secrets** (🔑 left sidebar) — read via `userdata.get`, never written to disk — otherwise leave it unset and wire a local TTS backend. The slug derived from the wake word keys this run's per-word Drive backups (step 5).
 
 # %%
 import os
@@ -201,9 +201,14 @@ from google.colab import userdata
 WAKE_WORD = "hey computer"  # <-- the phrase to detect
 os.environ["WAKE_WORD"] = WAKE_WORD
 os.environ["WORD_SLUG"] = WAKE_WORD.replace(" ", "_")
-# Key from Colab Secrets (🔑 left sidebar) — never pasted into the notebook or written to disk.
-os.environ["ELEVENLABS_API_KEY"] = userdata.get("ELEVENLABS_API_KEY")
-assert os.environ["ELEVENLABS_API_KEY"], "add ELEVENLABS_API_KEY in Colab Secrets (🔑) and grant this notebook access"
+# ElevenLabs is OPT-IN (Part A) and its ToS forbids training on the output (docs/data-licensing.md);
+# prefer a permissive local TTS backend. To use it, add ELEVENLABS_API_KEY in Colab Secrets (🔑);
+# left unset otherwise. Read via userdata.get, never written to disk.
+os.environ["ELEVENLABS_API_KEY"] = ""
+try:
+    os.environ["ELEVENLABS_API_KEY"] = userdata.get("ELEVENLABS_API_KEY") or ""
+except (userdata.SecretNotFoundError, userdata.NotebookAccessError):  # ruff-format strips these parens -> SyntaxError on py3  # fmt: skip
+    pass
 # GEMINI_API_KEY (Colab Secrets) is OPTIONAL — only A3's --llm-confusables uses it; unset ->
 # A3 falls back to the generic confusables. Same optional-secret pattern as GITHUB_TOKEN/HF_TOKEN.
 os.environ["GEMINI_API_KEY"] = ""
@@ -214,15 +219,21 @@ except (userdata.SecretNotFoundError, userdata.NotebookAccessError):  # ruff-for
 print("wake word:", WAKE_WORD, "| LLM confusables:", "on" if os.environ["GEMINI_API_KEY"] else "off")
 
 # %% [markdown]
-# ## Part A — positives & hard negatives (ElevenLabs v3)
+# ## Part A — positives & hard negatives (TTS — ElevenLabs path opt-in)
+#
+# Positives/hard-negatives train the head, so the TTS backend's terms must permit training on its
+# output. **ElevenLabs is opt-in and commented out below**: its [Prohibited Use Policy](https://elevenlabs.io/use-policy)
+# §9.k/§9.l forbid training on its Output (tier-independent). Prefer a permissively-licensed local
+# TTS — wire `wwd_i/data/local_tts.py` (Kokoro/Piper/Parler). See `docs/data-licensing.md`. Either
+# way, the cells below first restore prior clips from Drive if present.
 
 # %% [markdown]
-# ### A1. Smoke-test the SDK (one clip)
+# ### A1. (opt-in, ElevenLabs) Smoke-test the SDK (one clip)
 #
-# Validates your key and the SDK surface **before** spending on a batch. If it errors on the API call, the fix is usually a small tweak to `_synthesize`/`_client` in `wwd_i/data/elevenlabs.py` to match your installed SDK version.
+# Only if you opt into ElevenLabs: validates your key and the SDK surface **before** spending on a batch. If it errors on the API call, the fix is usually a small tweak to `_synthesize`/`_client` in `wwd_i/data/elevenlabs.py` to match your installed SDK version. Uncomment to run.
 
 # %%
-# !.venv/bin/python -m wwd_i.data.elevenlabs --phrase "$WAKE_WORD" --out $DATA/smoke --smoke
+# # !.venv/bin/python -m wwd_i.data.elevenlabs --phrase "$WAKE_WORD" --out $DATA/smoke --smoke
 
 # %% [markdown]
 # ### A2. Generate positives (~300 diverse clips)
@@ -230,11 +241,14 @@ print("wake word:", WAKE_WORD, "| LLM confusables:", "on" if os.environ["GEMINI_
 # Many voices × prosody settings; cached, so re-running is cheap and bumping `--n-clips` only adds new variants.
 
 # %%
-# positives — restore from Drive if a prior run saved them, else generate (paid) and back up
+# positives — restore from Drive if a prior run saved them, else GENERATE (opt-in below).
+# Generation is commented out: pick a TTS backend first (Part A note). The ElevenLabs magics
+# need ELEVENLABS_API_KEY (step 6) and are ToS-restricted for training data — uncomment to opt in.
 if not restore("pos"):
-    # !rm -fr /content/data/pos
-    # !.venv/bin/python -m wwd_i.data.elevenlabs --phrase "$WAKE_WORD" --out $DATA/pos --n-clips 300
-    backup("pos")
+    # # !rm -fr /content/data/pos
+    # # !.venv/bin/python -m wwd_i.data.elevenlabs --phrase "$WAKE_WORD" --out $DATA/pos --n-clips 300
+    # backup("pos")
+    print("no positives — enable a TTS backend in Part A (opt-in), then re-run this cell")
 
 # %% [markdown]
 # ### A3. Generate hard negatives (near phrases)
@@ -242,14 +256,15 @@ if not restore("pos"):
 # The wake phrase's sub-words + generic confusables (`negatives.hard_negative_phrases`), **plus** — when `GEMINI_API_KEY` is set (step 6) — N **acoustic confusables** of the wake phrase from Gemini (`--llm-confusables N`, `data.confusables`): near-homophones / rhymes that actually sound like the wake word, the hardest false-trigger source. No key → just the generic confusables.
 
 # %%
-# hard negatives — same restore-or-generate-then-backup pattern.
+# hard negatives — same restore-or-generate (opt-in) pattern.
 # --llm-confusables N adds N Gemini near-homophones of the wake phrase (the hardest negatives);
 # auto-enabled only when GEMINI_API_KEY is set (step 6), else generic confusables only.
 CONFUSABLES = "--llm-confusables 20" if os.environ.get("GEMINI_API_KEY") else ""
 if not restore("hardneg"):
-    # !rm -fr /content/data/hardneg
-    # !.venv/bin/python -m wwd_i.data.elevenlabs --hard-negs-for "$WAKE_WORD" --out $DATA/hardneg --n-clips 20 $CONFUSABLES
-    backup("hardneg")
+    # # !rm -fr /content/data/hardneg
+    # # !.venv/bin/python -m wwd_i.data.elevenlabs --hard-negs-for "$WAKE_WORD" --out $DATA/hardneg --n-clips 20 $CONFUSABLES
+    # backup("hardneg")
+    print("no hard negatives — enable a TTS backend in Part A (opt-in), then re-run this cell")
 
 # %% [markdown]
 # ## Part B — background negatives: noise, music, speech & vocal bursts
@@ -356,7 +371,7 @@ import os
 # Held-out continuous negatives for STREAMING calibration (Part C --calib-bg). A SEPARATE
 # AudioSet shard (bal_train08), disjoint from the training shard (bal_train09, B1), so it is
 # never embedded into bg_neg.npy and the FA/hr gate stays honest. Re-downloaded on a fresh
-# runtime rather than mirrored to Drive — it's one quick shard, not the ElevenLabs/FMA spend.
+# runtime rather than mirrored to Drive — it's one quick shard, not the TTS/FMA spend.
 CALIB_BG = f"{DATA}/calib_bg"
 if not (os.path.isdir(CALIB_BG) and os.listdir(CALIB_BG)):
     # !mkdir -p $DATA/calib_bg

@@ -1,27 +1,29 @@
-"""ElevenLabs v3 TTS sample generation (Phase 3).
+"""ElevenLabs v3 TTS backend (Phase 3) — opt-in.
 
 Synthesizes diverse spoken renderings of a phrase — voices balanced across
-gender/age/accent, crossed with stability/style/similarity settings — and caches
-them as 16 kHz mono wavs, RMS-normalized. Used for both positives (the wake
-phrase) and hard negatives (near phrases).
+gender/age/accent, crossed with stability/style/similarity settings. The generic
+machinery (caching, normalization, file layout, per-voice skip) lives in
+``tts.py``; this module is just the ElevenLabs ``TtsBackend``: list voices,
+spread the prosody grid, and call the SDK.
+
+**Opt-in / licensing.** ElevenLabs' Prohibited Use Policy forbids using its
+Output to train ML models, which is what the head pipeline does — so this backend
+is not the default. Prefer a permissively-licensed local TTS (``local_tts.py``).
+See ``docs/data-licensing.md``.
 
 The API key is read from ``ELEVENLABS_API_KEY``; nothing secret is stored in
 code. ``elevenlabs`` is a generation-only dep (the ``train`` group), imported
-lazily. The two network seams — listing voices and one synthesis call — are the
-only SDK-coupled code (``_client`` / ``_synthesize``); everything else (caching,
-PCM decode, normalization, voice/settings spread, file layout) is offline and
-unit-tested. Run ``--smoke`` (one clip) to validate the SDK before a big batch.
+lazily. The two network seams — listing voices (``_client``) and one synthesis
+call (``_synthesize``) — are the only SDK-coupled code and are injectable for
+tests. Run ``--smoke`` (one clip) to validate the SDK before a big batch.
 """
 
 import argparse
-import hashlib
 import os
-from pathlib import Path
 
 import numpy as np
-import soundfile as sf
 
-from wwd_i.config import SAMPLE_RATE
+from wwd_i.data.tts import TtsBackend, Variant, generate_clips
 
 DEFAULT_MODEL = "eleven_v3"
 PCM_FORMAT = "pcm_16000"  # raw s16le mono @ 16 kHz — no resample needed
@@ -103,23 +105,8 @@ def _is_unusable_voice(exc: Exception) -> bool:
     return isinstance(status, str) and status.startswith("voice_")
 
 
-def _error_message(exc: Exception) -> str:
-    return _error_detail(exc).get("message") or str(exc)
-
-
 def _pcm16_to_float(pcm: bytes) -> np.ndarray:
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
-
-
-def _rms_normalize(x: np.ndarray, target_dbfs: float = -20.0) -> np.ndarray:
-    rms = float(np.sqrt(np.mean(np.square(x, dtype=np.float64))))
-    if rms < 1e-6:
-        return x.astype(np.float32)  # silence — leave as-is
-    y = x * (10.0 ** (target_dbfs / 20.0) / rms)
-    peak = float(np.max(np.abs(y)))
-    if peak > 0.99:
-        y = y * (0.99 / peak)
-    return y.astype(np.float32)
 
 
 def _variants(n_clips: int, voice_ids: list[str], seed: int) -> list[tuple[str, float, float, float]]:
@@ -129,62 +116,40 @@ def _variants(n_clips: int, voice_ids: list[str], seed: int) -> list[tuple[str, 
     return [grid[i % len(grid)] for i in range(n_clips)]
 
 
-def generate_clips(
-    phrase: str,
-    out_dir: str | Path,
-    *,
-    n_clips: int = 300,
-    model: str = DEFAULT_MODEL,
-    max_voices: int = 40,
-    seed: int = 0,
-    client=None,
-    synthesize=_synthesize,
-) -> list[Path]:
-    """Synthesize ``n_clips`` diverse renderings of ``phrase`` into ``out_dir``.
+class ElevenLabsBackend(TtsBackend):
+    """``TtsBackend`` over the ElevenLabs v3 API. ``client`` / ``synthesize`` are
+    injectable seams (default to the real SDK) so the offline logic stays testable."""
 
-    Cached by (phrase, voice, settings): existing files are reused, so reruns and
-    a bumped ``n_clips`` only synthesize the new variants. ``client`` /
-    ``synthesize`` are injectable seams (default to the real SDK).
+    def __init__(self, *, model: str = DEFAULT_MODEL, max_voices: int = 40, client=None, synthesize=_synthesize):
+        self.model = model
+        self.max_voices = max_voices
+        self._given_client = client
+        self._synthesize = synthesize
 
-    A voice the API rejects (not fine-tuned, or disabled by its owner) is skipped for the
-    rest of the batch, so the returned count may be < ``n_clips``. Other failures (auth,
-    quota, rate-limit, network) are not voice-specific and propagate.
-    """
-    client = client or _client()
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    voice_ids = _balanced_voice_ids(client.voices.get_all().voices, max_voices, seed)
-    if not voice_ids:
-        raise RuntimeError("no voices available on this ElevenLabs account")
+    def _client(self):
+        if self._given_client is None:
+            self._given_client = _client()
+        return self._given_client
 
-    written: list[Path] = []
-    skipped: set[str] = set()
-    for voice_id, stability, style, similarity in _variants(n_clips, voice_ids, seed):
-        if voice_id in skipped:
-            continue
-        tag = hashlib.blake2b(
-            f"{phrase}|{voice_id}|{stability}|{style}|{similarity}".encode(), digest_size=8
-        ).hexdigest()
-        path = out_dir / f"{tag}.wav"
-        if not path.exists():
-            try:
-                pcm = synthesize(
-                    client, phrase, voice_id, model=model, stability=stability, style=style, similarity=similarity
-                )
-            except Exception as exc:  # noqa: BLE001 - re-raised below unless it's a skippable per-voice 400
-                if not _is_unusable_voice(exc):
-                    raise
-                skipped.add(voice_id)
-                print(f"skip voice {voice_id}: {_error_message(exc)}")
-                continue
-            sf.write(path, _rms_normalize(_pcm16_to_float(pcm)), SAMPLE_RATE)
-        if path not in written:
-            written.append(path)
-    return written
+    def variants(self, n_clips: int, *, seed: int) -> list[Variant]:
+        voice_ids = _balanced_voice_ids(self._client().voices.get_all().voices, self.max_voices, seed)
+        if not voice_ids:
+            raise RuntimeError("no voices available on this ElevenLabs account")
+        return [
+            Variant(tag=f"{v}|{st}|{sy}|{si}", voice=v, params={"stability": st, "style": sy, "similarity": si})
+            for v, st, sy, si in _variants(n_clips, voice_ids, seed)
+        ]
+
+    def synthesize(self, phrase: str, variant: Variant) -> np.ndarray:
+        pcm = self._synthesize(self._client(), phrase, variant.voice, model=self.model, **variant.params)
+        return _pcm16_to_float(pcm)
+
+    def is_unusable_voice(self, exc: Exception) -> bool:
+        return _is_unusable_voice(exc)
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Generate ElevenLabs v3 samples for a phrase (Phase 3).")
+    p = argparse.ArgumentParser(description="Generate ElevenLabs v3 samples for a phrase (Phase 3; opt-in).")
     p.add_argument("--phrase", help="text to synthesize, e.g. 'hey computer'")
     p.add_argument("--hard-negs-for", help="instead synthesize the hard-negative near-phrases for this wake phrase")
     p.add_argument(
@@ -204,7 +169,8 @@ def main() -> None:
     if not (args.phrase or args.hard_negs_for):
         p.error("pass --phrase or --hard-negs-for")
 
-    common = {"model": args.model, "max_voices": args.max_voices, "seed": args.seed}
+    backend = ElevenLabsBackend(model=args.model, max_voices=args.max_voices)
+    common = {"n_clips": args.n_clips, "seed": args.seed}
     if args.hard_negs_for:
         from wwd_i.data.negatives import hard_negative_phrases
 
@@ -215,12 +181,12 @@ def main() -> None:
             extra = generate_confusables(args.hard_negs_for, n=args.llm_confusables)
             print(f"+{len(extra)} LLM confusables: {', '.join(extra)}")
         phrases = hard_negative_phrases(args.hard_negs_for, extra)
-        written = [c for ph in phrases for c in generate_clips(ph, args.out, n_clips=args.n_clips, **common)]
+        written = [c for ph in phrases for c in generate_clips(ph, args.out, backend, **common)]
         print(f"wrote {len(written)} hard-negative clips across {len(phrases)} phrases under {args.out}")
         return
 
     n_clips = 1 if args.smoke else args.n_clips
-    paths = generate_clips(args.phrase, args.out, n_clips=n_clips, **common)
+    paths = generate_clips(args.phrase, args.out, backend, n_clips=n_clips, seed=args.seed)
     print(f"wrote {len(paths)} clip(s) for {args.phrase!r} under {args.out}")
 
 
