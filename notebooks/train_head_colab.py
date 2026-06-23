@@ -232,6 +232,7 @@ print("wake word:", WAKE_WORD, "| LLM confusables:", "on" if os.environ["GEMINI_
 # %%
 # positives — restore from Drive if a prior run saved them, else generate (paid) and back up
 if not restore("pos"):
+    # !rm -fr /content/data/pos
     # !.venv/bin/python -m wwd_i.data.elevenlabs --phrase "$WAKE_WORD" --out $DATA/pos --n-clips 300
     backup("pos")
 
@@ -246,6 +247,7 @@ if not restore("pos"):
 # auto-enabled only when GEMINI_API_KEY is set (step 6), else generic confusables only.
 CONFUSABLES = "--llm-confusables 20" if os.environ.get("GEMINI_API_KEY") else ""
 if not restore("hardneg"):
+    # !rm -fr /content/data/hardneg
     # !.venv/bin/python -m wwd_i.data.elevenlabs --hard-negs-for "$WAKE_WORD" --out $DATA/hardneg --n-clips 20 $CONFUSABLES
     backup("hardneg")
 
