@@ -67,6 +67,7 @@ except (userdata.SecretNotFoundError, userdata.NotebookAccessError):  # ruff-for
     pass
 os.environ["REPO_URL"] = REPO_URL
 os.environ["BRANCH"] = BRANCH
+os.chdir("/content")  # chdir to root before deleting
 # !rm -rf /content/wwd_i && git clone --branch "$BRANCH" --depth 1 "$REPO_URL" /content/wwd_i
 # %cd /content/wwd_i
 # !git log --oneline -1
