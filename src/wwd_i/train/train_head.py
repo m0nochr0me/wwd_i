@@ -285,8 +285,10 @@ def train(args: argparse.Namespace) -> None:
             raise RuntimeError(f"--calib-bg has no audio files under {args.calib_bg}")
         pos_paths = sorted(Path(args.positives).rglob("*.wav"))
         # threshold 0 + zero refractory => push() returns every hop; calibrate_stream
-        # re-thresholds offline with the real --refractory.
-        engine = WakeWordEngine(args.out, threshold=0.0, refractory_s=0.0)
+        # re-thresholds offline with the real --refractory. backbone_path=args.backbone so
+        # calibration runs against the SAME backbone the head was embedded on — incl. an int8
+        # one (Phase-6 re-gate: --backbone backbone.int8.onnx), not the packaged default.
+        engine = WakeWordEngine(args.out, threshold=0.0, refractory_s=0.0, backbone_path=args.backbone)
         result = calibrate_stream(
             engine, neg_paths, pos_paths, target_fa=args.target_fa, target_fr=args.target_fr, refractory=args.refractory
         )
