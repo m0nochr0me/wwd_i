@@ -62,6 +62,12 @@ seam.
   tier-independent (a paid commercial license does not waive the Prohibited Use
   Policy). Don't use this backend for distributed heads unless you have a custom
   agreement with ElevenLabs that covers it.
+- **Google Gemini (`data/gemini_tts.py`) is opt-in — verify your tier's terms.**
+  Google's Gemini API terms are less categorical than ElevenLabs', but not a blanket
+  all-clear: they restrict using output to develop competing models, and data use
+  differs by tier (the free tier may use your content to improve Google's products;
+  paid does not). Confirm the current [Gemini API Additional Terms](https://ai.google.dev/gemini-api/terms)
+  permit training a head for your tier before distributing one.
 - **A permissively-licensed local TTS keeps the pipeline clean end-to-end.**
   Implement `LocalTtsBackend` (`data/local_tts.py`) on **Kokoro** (Apache-2.0),
   **Piper** (MIT), or **Parler-TTS** (Apache-2.0) — all permit training on output.
