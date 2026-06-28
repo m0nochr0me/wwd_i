@@ -114,14 +114,16 @@ uv run wwd-i --mic --head artifacts/Aliyah_head.onnx
 uv run wwd-i --mic --head artifacts/Samara_head.onnx --head artifacts/whispers_Samara_head.onnx
 ```
 
-Each detection prints as `⚡ '<word>' @ <time>s score=<P(wake)>`. Useful flags:
+Each detection prints as
+`⚡ '<word>' @ <time>s score=<P(wake)> hops=<n>/10 hi-mel=<x>` — `hops` and
+`hi-mel` are the second-stage-gate signals (§10). Useful flags:
 
 | Flag                 | Effect                                                                     |
 | -------------------- | -------------------------------------------------------------------------- |
 | `--threshold X`      | override the calibrated threshold (single operating point)                 |
 | `--refractory S`     | override the debounce window in seconds                                    |
 | `--calibration PATH` | use a non-sibling calibration JSON (single `--head` only)                  |
-| `--debug`            | print input level (dBFS) and max `P(wake)` ~once/sec, even below threshold |
+| `--debug`            | print dBFS, hi-mel, and max `P(wake)` ~once/sec, even below threshold      |
 | `--save out.wav`     | dump captured mic audio for offline replay                                 |
 | `--no-normalize`     | disable input AGC — **debug only**, see §8                                 |
 
@@ -207,16 +209,24 @@ than one head raises `ValueError` (each head must use its own sibling JSON).
   head (single-word case).
 - `last_score: float` — most recent hop's max `P(wake)` across all heads, even
   when below threshold. For diagnostics / level meters; not a detection.
+- `last_high_mel_energy: float` — most recent hop's high-band mel energy (see
+  `Detection.high_mel_energy`). For diagnostics / tuning a stage-2 gate (§10).
 
 ### `Detection`
 
 Frozen dataclass returned by `push()`:
 
-| Field    | Type    | Meaning                                                          |
-| -------- | ------- | ---------------------------------------------------------------- |
-| `word`   | `str`   | which head fired (lets multiple words drive different responses) |
-| `time_s` | `float` | audio time at the **end** of the window that triggered           |
-| `score`  | `float` | `P(wake)` at that hop                                            |
+| Field             | Type    | Meaning                                                                       |
+| ----------------- | ------- | ----------------------------------------------------------------------------- |
+| `word`            | `str`   | which head fired (lets multiple words drive different responses)              |
+| `time_s`          | `float` | audio time at the **end** of the window that triggered                        |
+| `score`           | `float` | `P(wake)` at that hop                                                         |
+| `hops_above`      | `int`   | trailing hops above the soft gate level — rising-ramp persistence (§10)        |
+| `high_mel_energy` | `float` | peak high-band energy (top 8 of 32 mel bins) over the window — sibilant anchor (§10) |
+
+`hops_above` and `high_mel_energy` are evidence for an optional client-side
+second-stage gate (§10); the engine itself decides only on `score` ≥ threshold +
+refractory.
 
 ### `detect_file(engine, path) -> list[Detection]`
 
@@ -314,7 +324,68 @@ above what background speech produces.
 
 ---
 
-## 10. Always-on deployment
+## 10. Second-stage gating (rhythm / babble rejection)
+
+The engine's own decision is **stage 1**: `score ≥ threshold` + refractory. The
+score is a **top-k-mean over the trailing window**, so a lone single-hop spike
+(common on background media) already scores low and is mostly suppressed there.
+What can still slip through is loudness-normalized rhythmic noise — nearby
+conversation, a TV, or cadence like a 3-beat _"мя-мя-мЯ"_ — because the detector
+keys partly on a word's rhythm.
+
+Each `Detection` carries two extra fields so you can add a cheap **stage-2 gate**
+in your own handler and reject those without retraining:
+
+- **`hops_above`** — how many of the trailing 10 hops (~0.8 s) scored above the
+  head's **soft gate level** (half its threshold). It counts the rising _ramp_, so
+  a gradual real word gives several and an abrupt spike gives `1`. (Counting at the
+  firing threshold instead would always read `1`, because a fire is by definition
+  the first hop to cross.) Require `hops_above >= N` to demand a ramp.
+- **`high_mel_energy`** — the **peak** high-band energy over the window (max across
+  frames of the top-8-of-32-mel-bin mean), so a brief sibilant burst isn't diluted.
+  A _voiced_ rhythm imposter has little energy there, while a wake word with a
+  sibilant or obstruent (`s`, `ш`, `ц`, `ks`, …) lights it up. Require
+  `high_mel_energy >= θ` to reject voiced-only babble — only useful when your word
+  actually carries such a sound, and not a discriminator against general speech or
+  music (which have their own high-band content).
+
+Both are pure functions of the same per-hop buffers the engine already computes,
+so they cost nothing extra and are **identical streamed or batched** (they respect
+the parity gate).
+
+```python
+from wwd_i.runtime import WakeWordEngine
+
+engine = WakeWordEngine("artifacts/Oksana_head.onnx")
+
+MIN_HOPS = 3          # require persistence, not a lone spike
+MIN_HIGH_MEL = 2.0    # require high-band (sibilant) energy — word- & env-specific
+
+for det in engine.push(audio):
+    if det.hops_above >= MIN_HOPS and det.high_mel_energy >= MIN_HIGH_MEL:
+        on_wake(det.word)     # passed stage 2
+    # else: a stage-1 candidate the gate rejected
+```
+
+**Pick the thresholds from data, not by guessing.** Run the CLI with `--debug`
+(it prints `hi-mel` alongside `max P(wake)`), or log `hops_above` /
+`high_mel_energy` from real fires, and set each cut just below what your genuine
+utterances reach and above what the noise you want to reject produces. Start
+permissive and tighten.
+
+**It is a rejection filter, not a recall fix.** The gate only sees fires the
+engine already emitted (post threshold + refractory), so it can suppress false
+accepts but never recover a miss. One subtlety: a rejected false fire still
+consumed that head's refractory window, so a genuine wake within `refractory_s`
+of it can be lost — keep `refractory_s` modest if you lean on stage 2, or lower
+the stage-1 `threshold` slightly and let the gate do more of the work.
+
+For live tuning, `engine.last_high_mel_energy` exposes the most recent hop's
+high-band energy the same way `last_score` exposes `P(wake)`.
+
+---
+
+## 11. Always-on deployment
 
 Built to run continuously on a small CPU (target: Linux x86_64 and ARM64, RPi5
 class).
@@ -336,7 +407,7 @@ class).
 
 ---
 
-## 11. Worked example: react to a wake word
+## 12. Worked example: react to a wake word
 
 ```python
 from wwd_i.runtime import WakeWordEngine
@@ -368,7 +439,7 @@ yield 16 kHz mono float32 chunks and feed each to `engine.push()`.
 
 ---
 
-## 12. Rules & gotchas
+## 13. Rules & gotchas
 
 Things that won't raise an error but will quietly break detection if ignored:
 
@@ -393,12 +464,13 @@ Things that won't raise an error but will quietly break detection if ignored:
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | Symptom                                                | Likely cause                                   | Fix                                                                                   |
 | ------------------------------------------------------ | ---------------------------------------------- | ------------------------------------------------------------------------------------- |
 | Never fires on mic, even at a low threshold            | Input too quiet / AGC off / wrong input device | Keep `normalize=True`; check the device with `--debug` (watch dBFS and `max P(wake)`) |
 | Fires constantly / on silence                          | Threshold too low, or AGC amplifying room tone | Raise `threshold`; verify input level with `--debug`                                  |
+| Fires on nearby conversation / TV / rhythmic babble    | Rhythm-only match crossing the threshold       | Add a client-side second-stage gate (§10): require `hops_above` ≥ N and/or `high_mel_energy` ≥ θ |
 | One word double-fires                                  | Refractory too short                           | Raise `refractory_s`                                                                  |
 | `ValueError: no threshold for <head>`                  | Calibration JSON missing                       | Place `<head>.json` beside the head, or pass `threshold=`                             |
 | `RuntimeError: microphone capture needs 'sounddevice'` | Optional dep not installed                     | `uv add sounddevice`, or supply your own audio source                                 |
@@ -407,8 +479,10 @@ Things that won't raise an error but will quietly break detection if ignored:
 
 ---
 
-## 14. See also
+## 15. See also
 
+- [word-selection.md](word-selection.md) — how to choose a wake word that this
+  detector can learn well (and how to validate one).
 - [architecture.md](architecture.md) — design and rationale.
 - [implementation-plan.md](implementation-plan.md) — build phases.
 - [data-licensing.md](data-licensing.md) — code/model licenses and head-data terms.

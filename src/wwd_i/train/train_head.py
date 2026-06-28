@@ -43,6 +43,12 @@ from wwd_i.runtime.engine import WakeWordEngine
 WINDOW = 76  # mel frames fed to the backbone per hop (§3 rolling buffer ≈ 760 ms)
 CLIP_SECONDS = 1.5
 
+# Top-k-over-time aggregation for the clip score: a positive must hold a high
+# response over this many hops (not a single spike), which suppresses lone
+# false-accept spikes. MUST equal runtime.engine.HEAD_TOPK — the engine re-scores
+# with the same k; tests/test_engine.py asserts equality.
+HEAD_TOPK = 3
+
 
 def _default_backbone() -> str:
     from importlib.resources import files
@@ -268,25 +274,25 @@ def _fit(head: WakeHead, x: torch.Tensor, y: torch.Tensor, tr: np.ndarray, val: 
     lowest-val-loss checkpoint rather than the last epoch.
     """
     opt = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    lossfn = torch.nn.BCEWithLogitsLoss()
+    lossfn = torch.nn.BCELoss()  # clip_score is a probability (top-k mean), not a logit
     best_loss, best_state = float("inf"), copy.deepcopy(head.state_dict())
     for epoch in range(1, args.epochs + 1):
         head.train()
         perm = tr[torch.randperm(len(tr)).numpy()]
         for i in range(0, len(perm), args.batch_size):
             batch = perm[i : i + args.batch_size]
-            loss = lossfn(head.clip_logits(x[batch]), y[batch])
+            loss = lossfn(head.clip_score(x[batch], HEAD_TOPK), y[batch])
             opt.zero_grad()
             loss.backward()
             opt.step()
         head.eval()
         with torch.no_grad():
-            vloss = lossfn(head.clip_logits(x[val]), y[val]).item()
+            vloss = lossfn(head.clip_score(x[val], HEAD_TOPK), y[val]).item()
         if vloss < best_loss:
             best_loss, best_state = vloss, copy.deepcopy(head.state_dict())
         if epoch % args.log_every == 0 or epoch == args.epochs:
             with torch.no_grad():
-                acc = ((torch.sigmoid(head.clip_logits(x[tr])) >= 0.5).float() == y[tr]).float().mean().item()
+                acc = ((head.clip_score(x[tr], HEAD_TOPK) >= 0.5).float() == y[tr]).float().mean().item()
             print(f"epoch {epoch:>4} | train loss {loss.item():.4f} | val loss {vloss:.4f} | train acc {acc:.3f}")
     head.load_state_dict(best_state)
     print(f"restored best-val checkpoint (val loss {best_loss:.4f})")
@@ -344,7 +350,7 @@ def train(args: argparse.Namespace) -> None:
             calib_label += f" + {len(impostor_paths)} rhythm impostors"
     else:
         with torch.no_grad():
-            test_prob = torch.sigmoid(head.clip_logits(x[test])).cpu().numpy()
+            test_prob = head.clip_score(x[test], HEAD_TOPK).cpu().numpy()
         result = calibrate(test_prob, y[test].cpu().numpy(), target_fa=args.target_fa, target_fr=args.target_fr)
         calib_label = f"held-out test, {result['neg_hours']:.2f} h negatives"
 

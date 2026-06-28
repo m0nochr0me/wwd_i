@@ -53,11 +53,24 @@ WINDOW = 76
 # P(wake) to ~0 after the first seconds. tests/test_engine.py pins this to the train value.
 HEAD_CONTEXT_HOPS = 10
 
+# Top-k-over-time aggregation for the per-hop score: each decision is the mean of
+# the k highest P(wake) over the trailing HEAD_CONTEXT_HOPS, so a lone single-hop
+# spike (common on background media) scores low and a sustained word scores high.
+# MUST equal train.train_head.HEAD_TOPK — the head is trained on the same k;
+# tests/test_engine.py asserts equality.
+HEAD_TOPK = 3
+
 # High-frequency mel bins summarized into ``Detection.high_mel_energy``: the top
 # HIGH_MEL_BINS of N_MELS (≈ the ≥3.5 kHz sibilant/fricative band at 32 mels over
 # 0-8 kHz). A voiced rhythm imposter has little energy there, so a client-side
 # second-stage gate can require it — it never affects the engine's own decision.
 HIGH_MEL_BINS = 8
+
+# ``Detection.hops_above`` counts trailing hops whose score cleared this fraction
+# of the head's threshold — a *sub-threshold* level, so it measures the rising
+# ramp (gradual for a real word, abrupt for a spike) instead of pinning to 1 at
+# the rising edge where the fire is emitted.
+GATE_SOFT_FRACTION = 0.5
 
 # Loudness normalization (AGC). The frozen backbone is strongly loudness-sensitive
 # — a -12 dB input level drop already halves the embedding's cosine similarity, and
@@ -126,13 +139,14 @@ class Detection:
     ``hops_above`` and ``high_mel_energy`` are extra evidence for an optional
     client-side second-stage gate (the engine itself only applies threshold +
     refractory). ``hops_above`` is how many of the trailing ``HEAD_CONTEXT_HOPS``
-    hops scored at/above this head's threshold — an N-of-M persistence count, so a
-    lone rhythm spike gives 1 while a sustained word gives several.
-    ``high_mel_energy`` is the mean log-mel energy of the top ``HIGH_MEL_BINS``
-    (high-frequency) bins over the firing window — a proxy for sibilant/fricative
-    frication that a voiced rhythm imposter (e.g. "мя-мя-мЯ") cannot fake. Both are
-    pure functions of the per-hop buffers, so they are identical streamed or
-    batched (the parity gate)."""
+    hops scored above ``GATE_SOFT_FRACTION`` of this head's threshold — a count of
+    the rising ramp, so a gradual real word gives several while an abrupt spike
+    gives 1 (counting at the firing threshold instead would pin it to 1, since a
+    fire *is* the rising edge). ``high_mel_energy`` is the peak high-frequency
+    energy over the window (max over frames of the per-frame top-``HIGH_MEL_BINS``
+    mean) — a proxy for sibilant/fricative frication that a voiced rhythm imposter
+    (e.g. "мя-мя-мЯ") cannot fake. Both are pure functions of the per-hop buffers,
+    so they are identical streamed or batched (the parity gate)."""
 
     word: str
     time_s: float
@@ -163,6 +177,7 @@ class _Head:
         self.session = session
         self.word = word
         self.threshold = float(threshold)
+        self._soft_level = GATE_SOFT_FRACTION * self.threshold  # sub-threshold level for hops_above
         self.refractory_s = float(refractory_s)
         ins = session.get_inputs()
         self._emb_in, self._h_in = (i.name for i in ins)
@@ -177,17 +192,22 @@ class _Head:
         self._recent: list[bool] = []  # trailing ≤HEAD_CONTEXT_HOPS above-threshold flags (N-of-M persistence)
 
     def _score(self, emb_buf: np.ndarray) -> float:
-        """Max ``P(wake)`` over the trailing embeddings, from a ZERO GRU state —
-        ``sigmoid`` of the max-over-time clip logit the head was trained on."""
+        """Top-``HEAD_TOPK``-mean ``P(wake)`` over the trailing embeddings, from a
+        ZERO GRU state — the exact criterion the head was trained on
+        (``train_head.clip_score``). Re-running from zero each hop is deliberate;
+        carrying state across the stream collapses ``P(wake)`` (see ``HEAD_CONTEXT_HOPS``)."""
         h = np.zeros((1, 1, self.hidden), dtype=np.float32)
-        best = 0.0
+        probs: list[float] = []
         for e in emb_buf:
             prob, h = self.session.run(
                 [self._prob_out, self._hn_out],
                 {self._emb_in: e[None, None].astype(np.float32), self._h_in: h},
             )
-            best = max(best, float(np.asarray(prob).reshape(-1)[0]))
-        return best
+            probs.append(float(np.asarray(prob).reshape(-1)[0]))
+        if not probs:
+            return 0.0
+        k = min(HEAD_TOPK, len(probs))
+        return float(sum(sorted(probs, reverse=True)[:k]) / k)
 
     def step(self, emb_buf: np.ndarray, t_end: float, high_mel_energy: float) -> Detection | None:
         """Score the current window; fire (a Detection tagged with this word) when
@@ -196,10 +216,9 @@ class _Head:
         persistence count (``hops_above``)."""
         score = self._score(emb_buf)
         self.last_score = score
-        above = score >= self.threshold
-        self._recent.append(above)
+        self._recent.append(score >= self._soft_level)  # ramp count, not rising-edge (always 1) count
         self._recent = self._recent[-HEAD_CONTEXT_HOPS:]
-        if above and (t_end - self._last_fire_s) >= self.refractory_s:
+        if score >= self.threshold and (t_end - self._last_fire_s) >= self.refractory_s:
             self._last_fire_s = t_end
             return Detection(
                 word=self.word,
@@ -348,8 +367,10 @@ class WakeWordEngine:
             window = self._mel_buf[:WINDOW][None]  # [1, WINDOW, n_mels]
             emb = self._backbone.run(None, {self._bb_in: window})[0]  # [1, D] — embed once, shared by all heads
             self._emb_buf = np.concatenate([self._emb_buf, emb])[-HEAD_CONTEXT_HOPS:]
-            # high-band energy over the same window — shared, word-independent (second-stage-gate evidence)
-            high_mel = float(self._mel_buf[:WINDOW, -HIGH_MEL_BINS:].mean())
+            # high-band energy over the same window — shared, word-independent (second-stage-gate evidence).
+            # Peak frication moment (max over frames of the per-frame top-bin mean), not a window mean that
+            # would dilute a brief sibilant burst (e.g. the /ks/ in "Oksana") across the ~760 ms window.
+            high_mel = float(self._mel_buf[:WINDOW, -HIGH_MEL_BINS:].mean(axis=1).max())
             self._last_high_mel = high_mel
             t_end = (self._hop * MEL_FRAMES_PER_FRAME + WINDOW) * HOP_LENGTH / SAMPLE_RATE
             self._hop += 1

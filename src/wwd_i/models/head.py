@@ -62,8 +62,22 @@ class WakeHead(nn.Module):
         return torch.cat(logits, dim=1), h.unsqueeze(0)  # logits [B, T], hn [1, B, H]
 
     def clip_logits(self, emb: Tensor) -> Tensor:
-        """Max-over-time logit per clip ``[B]`` — the streaming training target."""
+        """Max-over-time logit per clip ``[B]`` — a primitive (superseded as the
+        training target by :meth:`clip_score`; still handy for diagnostics)."""
         return self.forward(emb)[0].amax(dim=1)
+
+    def clip_score(self, emb: Tensor, k: int) -> Tensor:
+        """Top-``k``-mean ``P(wake)`` per clip ``[B]`` — the streaming training target.
+
+        The mean of the ``k`` highest per-hop probabilities, so a positive must hold
+        a high response over *several* hops rather than a single-hop spike — the
+        criterion that suppresses lone false-accept spikes and that the engine
+        re-scores at runtime (``runtime.engine._Head._score``, same ``k``).
+        Operates in probability space (``mean`` does not commute with ``sigmoid``,
+        so training and the engine must aggregate post-sigmoid)."""
+        probs = torch.sigmoid(self.forward(emb)[0])  # [B, T]
+        k = min(k, probs.shape[1])
+        return probs.topk(k, dim=1).values.mean(dim=1)
 
 
 class _StreamHead(nn.Module):

@@ -14,32 +14,36 @@ from wwd_i.train.train_head import WINDOW, _default_backbone, _windows, calibrat
 D = 96
 
 
-def test_head_shapes_and_clip_logits():
+def test_head_shapes_and_clip_score():
     head = WakeHead().eval()
     emb = torch.randn(2, 10, D)
     logits, hn = head(emb)
     assert logits.shape == (2, 10) and hn.shape == (1, 2, 48)
     assert head.clip_logits(emb).shape == (2,)
+    s = head.clip_score(emb, 3)  # top-k-mean probability per clip
+    assert s.shape == (2,) and bool(((s >= 0) & (s <= 1)).all())
 
 
 def test_head_trains_on_separable_data():
+    from wwd_i.train.train_head import HEAD_TOPK
+
     g = torch.Generator().manual_seed(0)
     pos = torch.randn(64, 10, D, generator=g) * 0.1
-    pos[:, 5, 0] += 3.0  # a detectable spike at one hop
+    pos[:, 3:8, 0] += 3.0  # a SUSTAINED response over several hops (the top-k criterion, not a lone spike)
     neg = torch.randn(64, 10, D, generator=g) * 0.1
     x = torch.cat([pos, neg])
     y = torch.cat([torch.ones(64), torch.zeros(64)])
 
     head = WakeHead(HeadConfig(hidden=32))
     opt = torch.optim.Adam(head.parameters(), lr=1e-2)
-    lossfn = torch.nn.BCEWithLogitsLoss()
+    lossfn = torch.nn.BCELoss()  # clip_score is a probability
     for _ in range(200):
-        loss = lossfn(head.clip_logits(x), y)
+        loss = lossfn(head.clip_score(x, HEAD_TOPK), y)
         opt.zero_grad()
         loss.backward()
         opt.step()
     head.eval()
-    acc = ((torch.sigmoid(head.clip_logits(x)) >= 0.5).float() == y).float().mean()
+    acc = ((head.clip_score(x, HEAD_TOPK) >= 0.5).float() == y).float().mean()
     assert acc > 0.9
 
 

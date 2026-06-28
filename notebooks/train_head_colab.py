@@ -361,6 +361,25 @@ else:
     # !echo "mswc speech-negative clips:"; find $DATA/bg/mswc -name '*.wav' | wc -l
 
 # %% [markdown]
+# ### B3½. Continuous conversational-speech negatives (the YouTube-style FA lever)
+#
+# MSWC (B3) is **single words**; the false accepts you actually hit come from **continuous** speech — conversation, TV, a YouTube video playing nearby — where the sliding window lands on word *boundaries* and co-articulations that single words never show. This streams **sentence-length** speech from a conversational corpus into the same `bg_neg.npy` cache (each multi-second clip yields several overlapping crops in Part B½), tightening the boundary against exactly the audio that triggers in the field. Swap `--dataset` for your locale/content (`--inspect` lists a set's audio column); skipped if the cache already exists.
+
+# %%
+# Continuous-speech negatives (sentence-length, conversational) folded into the SAME bg cache.
+# MSWC is single WORDS; field false-accepts are CONTINUOUS speech (conversation/TV/YouTube), where the
+# window straddles word boundaries MSWC never shows. Each multi-second clip -> several crops in Part B½.
+# Materialized under $DATA/bg/media_speech so `preprocess_bg --background $DATA/bg` picks it up.
+# Default corpus = MLCommons/peoples_speech (diverse real-world English); swap --dataset for your
+# locale/content, and run with --inspect first if unsure of the audio column. Skipped if the cache exists.
+if os.path.exists(f"{DATA}/bg_neg.npy") or os.path.exists(f"{DRIVE}/bg_neg.npy"):
+    print("bg_neg cache present — skipping continuous-speech negatives")
+else:
+    # !uv pip install --python .venv/bin/python 'datasets<4'
+    # !.venv/bin/python -m wwd_i.data.hf_audio --dataset MLCommons/peoples_speech --n-clips 4000 --seed 0 --out $DATA/bg/media_speech --min-seconds 2 --max-stream 200000
+    # !echo "continuous-speech clips:"; find $DATA/bg/media_speech -name '*.wav' | wc -l
+
+# %% [markdown]
 # ### B4. Vocal bursts (cough / laugh / breath) — non-speech false-accept triggers
 #
 # Coughs, laughs, throat-clears and breaths are classic wake-word **false accepts** that
@@ -387,7 +406,9 @@ else:
 # %% [markdown]
 # ### B5. Held-out negatives for streaming calibration
 #
-# Part C calibrates the threshold by streaming continuous negative audio through the **real runtime engine** (sliding the window every 80 ms + refractory debounce) — the honest FA/hr, not one max-over-time score per isolated clip. That set must be **held out** from the training negatives, so this pulls a **separate AudioSet shard** (`bal_train08`, disjoint from the training shard `bal_train09` in B1) into `$DATA/calib_bg`; it is never folded into `bg_neg.npy`. AudioSet's ~10 s clips of real audio (speech/music/noise) are exactly what the runtime slides over — more held-out hours = finer FA/hr resolution.
+# Part C calibrates the threshold by streaming continuous negative audio through the **real runtime engine** (sliding the window every 80 ms + refractory debounce) — the honest FA/hr, not one top-k-mean score per isolated clip. That set must be **held out** from the training negatives, so this pulls a **separate AudioSet shard** (`bal_train08`, disjoint from the training shard `bal_train09` in B1) into `$DATA/calib_bg`; it is never folded into `bg_neg.npy`. AudioSet's ~10 s clips of real audio (speech/music/noise) are exactly what the runtime slides over — more held-out hours = finer FA/hr resolution.
+#
+# **Calibrate against your deployment.** The threshold is only as honest as this held-out set is representative. If you know the FA distribution you'll face — a TV nearby, a specific YouTube channel, an office — drop a recording of it into `$DATA/calib_bg` (any 16 kHz-resamplable file; `wwd-i --mic --save` captures one). The sweep then picks a threshold that actually suppresses *your* false-accept sources, not generic AudioSet.
 
 # %%
 import os
@@ -401,6 +422,8 @@ if not (os.path.isdir(CALIB_BG) and os.listdir(CALIB_BG)):
     # !mkdir -p $DATA/calib_bg
     # !wget -q -O /tmp/calib.tar 'https://huggingface.co/datasets/agkphysics/AudioSet/resolve/5a2fa42a1506470d275a47ff8e1fdac5b364e6ef/data/bal_train08.tar?download=true'
     # !tar -xf /tmp/calib.tar -C $DATA/calib_bg && rm /tmp/calib.tar
+# Deployment-matched calibration: also drop your own FA audio (a YouTube/TV capture) into calib_bg.
+# # !cp "$DRIVE/my_media.wav" $DATA/calib_bg/
 # !echo "calib negatives:"; find $DATA/calib_bg -type f | wc -l
 
 # %% [markdown]
@@ -427,7 +450,7 @@ if not (r1 and r2):
 #
 # `--background` here points at the small `noise_pool` (additive-noise augmentation for the positives); the bulk negatives come from the cache, so there's no `--n-bg-neg`/`--max-bg` decode at train time. The trained head is mirrored to Drive.
 #
-# `--calib-bg $DATA/calib_bg` (B5) makes calibration **honest for streaming**: instead of one max-over-time score per isolated 1.5 s negative clip, it exports the head and runs the **real engine** over the held-out continuous negatives — sliding the window every 80 ms with the refractory debounce, exactly as the runtime does — so the reported FA/hr matches deployment (the DET table is then labelled `streaming`). Streaming a few hours through the CPU engine adds a few minutes. Drop `--calib-bg` to fall back to the faster per-clip estimate.
+# `--calib-bg $DATA/calib_bg` (B5) makes calibration **honest for streaming**: instead of one top-k-mean score per isolated 1.5 s negative clip, it exports the head and runs the **real engine** over the held-out continuous negatives — sliding the window every 80 ms with the refractory debounce, exactly as the runtime does — so the reported FA/hr matches deployment (the DET table is then labelled `streaming`). Streaming a few hours through the CPU engine adds a few minutes. Drop `--calib-bg` to fall back to the faster per-clip estimate.
 #
 # When A4 produced them, `--rhythm-neg` folds the rhythm-impostor babble into the **training** negatives, and `--rhythm-impostors` adds the held-out set to the streaming eval: the DET table then carries an **imp-FA** column (fraction of impostors that false-fire at each threshold) and the `[gate]` line reports it at the chosen threshold. Add `--target-impostor-far 0.05` to also **gate** on it (and bias the chosen threshold toward suppressing impostors).
 
@@ -455,7 +478,7 @@ files.download(f"{DATA}/artifacts/{slug}_head.json")
 # ## Interpreting the gate
 #
 # - **PASS** (FA < 0.5/hr, FR < 5%): drop `<word>_head.onnx` + its `.json` (threshold + refractory) into the repo — the frozen backbone plus this head are a complete detector → Phase 5 (streaming runtime).
-# - **High FA**: more / harder negatives — most FAs are speech, so scale the **MSWC** speech set (B3) first; then rebuild the cache with a bigger preprocess `--n-bg-neg` (and more background files), or add more hard-neg phrases.
+# - **High FA**: more / harder negatives — most FAs are speech, so scale the **continuous-speech** set (B3½) and **MSWC** (B3) first, and calibrate against your real FA audio (B5); then rebuild the cache with a bigger preprocess `--n-bg-neg` (and more background files), or add more hard-neg phrases.
 # - **High imp-FA** (rhythm impostors false-firing): the word is being matched on cadence alone — enlarge `--rhythm-neg` (A4, more `--n-impostors`/`--n-clips`) and consider a word with a hard-to-fake high-band consonant (`s`/`ш`/`ц`/`ks`); a persistent gap means lean on the client-side second-stage gate (`hops_above` + `high_mel_energy` on each `Detection`).
 # - **High FR**: more positives (`--n-clips`) or augmentation variety (`--n-aug`); confirm the A1/A2 clips are on-phrase.
 # - With `--calib-bg` the FA/hr is the **streaming** rate over the **held-out** negative hours (B5) — add more held-out shards to resolve < 0.5/hr confidently. Without it, the per-clip estimate's resolution scales with the preprocess `--n-bg-neg` instead.

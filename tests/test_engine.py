@@ -165,9 +165,18 @@ def test_rms_normalizer_gain_invariant_and_chunk_safe():
     assert float(np.max(np.abs(_RmsNormalizer(win, max_gain=20.0)(faint)))) <= 1e-4 * 20.0 + 1e-9
 
 
+def test_topk_matches_trainer():
+    """The runtime top-k aggregation must equal the head's training top-k."""
+    pytest.importorskip("torch")
+    from wwd_i.runtime.engine import HEAD_TOPK
+    from wwd_i.train.train_head import HEAD_TOPK as TRAIN_TOPK
+
+    assert HEAD_TOPK == TRAIN_TOPK
+
+
 def test_hops_above_counts_persistence(tmp_path):
-    """hops_above is the trailing N-of-M above-threshold count: with every hop above
-    threshold it ramps 1,2,...,HEAD_CONTEXT_HOPS then saturates (never exceeds M)."""
+    """hops_above counts trailing hops above the soft gate level: with every hop
+    above it the count ramps 1,2,...,HEAD_CONTEXT_HOPS then saturates (never > M)."""
     from wwd_i.runtime.engine import HEAD_CONTEXT_HOPS
 
     dets = _engine(tmp_path, threshold=-1.0, refractory=0.0).push(_noise(40, seed=7))

@@ -156,16 +156,19 @@ Size ~50–200 KB.
 - **Written in primitive ops, not `nn.GRU`.** Two linears + explicit gates, so the
   exported ONNX matches torch to fp32. `nn.GRU`→ONNX uses a different reset-gate
   formulation that drifts ~4e-3 and breaks the torch-calibrated threshold.
-- **Trained on ~1.5 s clips with a max-over-time logit.** The GRU runs across the
-  clip's embeddings from a zero initial state and the supervision is the **max**
-  over those per-hop logits — "the word appears somewhere in the window."
+- **Trained on ~1.5 s clips with a top-k-mean-over-time score.** The GRU runs
+  across the clip's embeddings from a zero initial state and the supervision is the
+  **mean of the `HEAD_TOPK=3` highest** per-hop probabilities — "the word holds a
+  high response over several hops," which suppresses lone single-hop false-accept
+  spikes (a superset of the older plain max-over-time, which a single spike could
+  satisfy).
 - **Re-scored from a ZERO state each hop at inference — _not_ a carried streaming
   state.** This is the one place the runtime departs from the early "stateful
   streaming GRU" sketch. Each hop the engine re-runs the head from zero over the
-  trailing `HEAD_CONTEXT_HOPS=10` embeddings and takes the max `P(wake)` — exactly
-  the criterion it was trained on. Carrying one hidden state across the whole
-  stream instead lets `‖h‖` run away and collapses `P(wake)→0` after a few seconds.
-  See `runtime/engine.py` and integration-guide §12.
+  trailing `HEAD_CONTEXT_HOPS=10` embeddings and takes the top-k-mean `P(wake)` —
+  exactly the criterion it was trained on (same `HEAD_TOPK`). Carrying one hidden
+  state across the whole stream instead lets `‖h‖` run away and collapses
+  `P(wake)→0` after a few seconds. See `runtime/engine.py` and integration-guide §13.
 
 ### Post-processing
 
@@ -238,7 +241,7 @@ the source are ground truth.
    not pursued. §5.2
 2. **Backbone block** — **BC-ResNet**. §5.1
 3. **Head type** — **GRU** (primitive ops), but re-scored from a zero state over a
-   trailing window each hop (max-over-time), _not_ a carried streaming state. §6
+   trailing window each hop (top-k-mean-over-time), _not_ a carried streaming state. §6
 4. **Embedding dim** — **D = 96**. §5.1
 5. **n_mels** — **32**. §4
 6. **CPU VAD gate** — **deferred** (not needed: the always-on engine already runs
