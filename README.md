@@ -85,6 +85,7 @@ Install the training stack with `uv sync --group train`; see the notebooks under
 ## Docs
 
 - [Integration guide](docs/integration-guide.md) — embed it: install, API, gotchas.
+- [Choosing a wake word](docs/word-selection.md) — pick a word the detector can learn; validate it.
 - [Architecture & design](docs/architecture.md)
 - [Phased implementation plan](docs/implementation-plan.md)
 - [Licensing & data provenance](docs/data-licensing.md) — code/model licenses, head-data terms.
