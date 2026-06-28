@@ -97,6 +97,9 @@ def test_streaming_matches_batch(tmp_path):
     np.testing.assert_array_equal([d.time_s for d in batch], [d.time_s for d in stream])  # deterministic time grid
     diff = np.max(np.abs([d.score for d in batch] - np.array([d.score for d in stream])))
     assert diff < 1e-4, f"seam/state mismatch: {diff}"  # GRU state carried identically across chunk boundaries
+    # second-stage-gate fields are pure functions of the per-hop buffers -> also identical block==stream
+    np.testing.assert_array_equal([d.hops_above for d in batch], [d.hops_above for d in stream])
+    np.testing.assert_allclose([d.high_mel_energy for d in batch], [d.high_mel_energy for d in stream], atol=1e-5)
 
 
 def test_streaming_matches_batch_with_agc(tmp_path):
@@ -160,6 +163,35 @@ def test_rms_normalizer_gain_invariant_and_chunk_safe():
     # near-silence is not amplified to speech level (gain is capped)
     faint = np.full(SAMPLE_RATE, 1e-4, dtype=np.float32)
     assert float(np.max(np.abs(_RmsNormalizer(win, max_gain=20.0)(faint)))) <= 1e-4 * 20.0 + 1e-9
+
+
+def test_hops_above_counts_persistence(tmp_path):
+    """hops_above is the trailing N-of-M above-threshold count: with every hop above
+    threshold it ramps 1,2,...,HEAD_CONTEXT_HOPS then saturates (never exceeds M)."""
+    from wwd_i.runtime.engine import HEAD_CONTEXT_HOPS
+
+    dets = _engine(tmp_path, threshold=-1.0, refractory=0.0).push(_noise(40, seed=7))
+    counts = [d.hops_above for d in dets]
+    assert len(counts) > HEAD_CONTEXT_HOPS
+    assert counts[:HEAD_CONTEXT_HOPS] == list(range(1, HEAD_CONTEXT_HOPS + 1))  # ramp
+    assert all(c == HEAD_CONTEXT_HOPS for c in counts[HEAD_CONTEXT_HOPS:])  # saturates at M
+
+
+def test_high_mel_energy_tracks_high_band(tmp_path):
+    """high_mel_energy summarizes the top mel bins, so a high-frequency tone reads
+    higher there than a low-frequency one — the sibilant-anchor signal a client
+    second-stage gate keys on to reject voiced rhythm imposters."""
+
+    def tone(hz):
+        t = np.arange(FRAME_SAMPLES * 40) / SAMPLE_RATE
+        return (0.1 * np.sin(2 * np.pi * hz * t)).astype(np.float32)
+
+    eng = _engine(tmp_path, threshold=-1.0, refractory=0.0)  # every hop fires
+    hi = eng.push(tone(6500))
+    eng.reset()
+    lo = eng.push(tone(200))
+    assert hi and lo
+    assert float(np.mean([d.high_mel_energy for d in hi])) > float(np.mean([d.high_mel_energy for d in lo]))
 
 
 def test_refractory_spacing(tmp_path):

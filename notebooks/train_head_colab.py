@@ -216,7 +216,7 @@ try:
     os.environ["GEMINI_API_KEY"] = userdata.get("GEMINI_API_KEY") or ""
 except (userdata.SecretNotFoundError, userdata.NotebookAccessError):  # ruff-format strips these parens -> SyntaxError on py3  # fmt: skip
     pass
-print("wake word:", WAKE_WORD, "| LLM confusables:", "on" if os.environ["GEMINI_API_KEY"] else "off")
+print("wake word:", WAKE_WORD, "| LLM confusables + rhythm impostors:", "on" if os.environ["GEMINI_API_KEY"] else "off")
 
 # %% [markdown]
 # ## Part A — positives & hard negatives (TTS — ElevenLabs path opt-in)
@@ -265,6 +265,30 @@ if not restore("hardneg"):
     # # !.venv/bin/python -m wwd_i.data.elevenlabs --hard-negs-for "$WAKE_WORD" --out $DATA/hardneg --n-clips 20 $CONFUSABLES
     # backup("hardneg")
     print("no hard negatives — enable a TTS backend in Part A (opt-in), then re-run this cell")
+
+# %% [markdown]
+# ### A4. (opt-in) Rhythm impostors — nonsense babble at the wake-word cadence
+#
+# The architecture keys partly on a word's **rhythm**, so a 3-beat *"мя-мя-мЯ"* can false-trigger a 3-syllable word like *Samara*. This generates **non-word, all-sonorant babble** matching the wake word's syllable count and stress (`data.confusables.generate_rhythm_impostors` via Gemini → TTS) in **two disjoint sets**: `rhythm_neg` is folded into the **training** negatives (`--rhythm-neg`, Part C) so the head learns to reject rhythm-only matches, and `rhythm_eval` is **held out** for the FA eval (`--rhythm-impostors`, Part C) so the `[gate]` line reports an **imp-FA** — the fraction of impostors that false-fire, which the continuous AudioSet negatives (B5) can't surface. Needs `GEMINI_API_KEY` (step 6) **and** an opt-in TTS backend (Part A); skipped otherwise. The two sets come from separate Gemini calls + `--seed`s (different strings *and* voices) so the eval stays held out — peek in both dirs if you want to confirm they're disjoint.
+
+# %%
+# Rhythm impostors: nonsense babble at the wake-word cadence (the "мя-мя-мЯ fires Samara" case),
+# via the same opt-in TTS path as A2/A3 (magics commented). TWO disjoint sets: rhythm_neg ->
+# TRAINING negatives (--rhythm-neg), rhythm_eval -> HELD-OUT FA eval (--rhythm-impostors). Both
+# need GEMINI_API_KEY (Gemini writes the strings) + a TTS backend; restore-or-generate like A3.
+if not os.environ.get("GEMINI_API_KEY"):
+    print("no GEMINI_API_KEY — skipping rhythm impostors (set it in step 6 to enable)")
+else:
+    if not restore("rhythm_neg"):
+        # # !rm -fr /content/data/rhythm_neg
+        # # !.venv/bin/python -m wwd_i.data.elevenlabs --rhythm-impostors-for "$WAKE_WORD" --out $DATA/rhythm_neg --n-impostors 20 --n-clips 10 --seed 0
+        # backup("rhythm_neg")
+        print("no rhythm_neg — enable a TTS backend in Part A (opt-in), then re-run this cell")
+    if not restore("rhythm_eval"):
+        # # !rm -fr /content/data/rhythm_eval
+        # # !.venv/bin/python -m wwd_i.data.elevenlabs --rhythm-impostors-for "$WAKE_WORD" --out $DATA/rhythm_eval --n-impostors 20 --n-clips 10 --seed 1
+        # backup("rhythm_eval")
+        print("no rhythm_eval — enable a TTS backend in Part A (opt-in), then re-run this cell")
 
 # %% [markdown]
 # ## Part B — background negatives: noise, music, speech & vocal bursts
@@ -404,10 +428,17 @@ if not (r1 and r2):
 # `--background` here points at the small `noise_pool` (additive-noise augmentation for the positives); the bulk negatives come from the cache, so there's no `--n-bg-neg`/`--max-bg` decode at train time. The trained head is mirrored to Drive.
 #
 # `--calib-bg $DATA/calib_bg` (B5) makes calibration **honest for streaming**: instead of one max-over-time score per isolated 1.5 s negative clip, it exports the head and runs the **real engine** over the held-out continuous negatives — sliding the window every 80 ms with the refractory debounce, exactly as the runtime does — so the reported FA/hr matches deployment (the DET table is then labelled `streaming`). Streaming a few hours through the CPU engine adds a few minutes. Drop `--calib-bg` to fall back to the faster per-clip estimate.
+#
+# When A4 produced them, `--rhythm-neg` folds the rhythm-impostor babble into the **training** negatives, and `--rhythm-impostors` adds the held-out set to the streaming eval: the DET table then carries an **imp-FA** column (fraction of impostors that false-fire at each threshold) and the `[gate]` line reports it at the chosen threshold. Add `--target-impostor-far 0.05` to also **gate** on it (and bias the chosen threshold toward suppressing impostors).
 
 # %%
+# Pass --rhythm-neg (training) + --rhythm-impostors (held-out eval) only when A4 produced the dirs
+# (GEMINI_API_KEY + opt-in TTS); empty strings otherwise so the flags simply vanish from the command.
+rneg_dir, reval_dir = f"{DATA}/rhythm_neg", f"{DATA}/rhythm_eval"
+RHYTHM_NEG = f"--rhythm-neg {rneg_dir}" if os.path.isdir(rneg_dir) and os.listdir(rneg_dir) else ""
+RHYTHM_EVAL = f"--rhythm-impostors {reval_dir}" if os.path.isdir(reval_dir) and os.listdir(reval_dir) else ""
 # !mkdir -p $DATA/artifacts
-# !.venv/bin/python -m wwd_i.train.train_head --word "$WAKE_WORD" --positives $DATA/pos --hard-neg $DATA/hardneg --background $DATA/noise_pool --bg-neg-emb $DATA/bg_neg.npy --calib-bg $DATA/calib_bg --n-aug 5 --epochs 40 --hidden 48 --out $DATA/artifacts/${WORD_SLUG}_head.onnx --threshold-out $DATA/artifacts/${WORD_SLUG}_head.json
+# !.venv/bin/python -m wwd_i.train.train_head --word "$WAKE_WORD" --positives $DATA/pos --hard-neg $DATA/hardneg $RHYTHM_NEG --background $DATA/noise_pool --bg-neg-emb $DATA/bg_neg.npy --calib-bg $DATA/calib_bg $RHYTHM_EVAL --n-aug 5 --epochs 40 --hidden 48 --out $DATA/artifacts/${WORD_SLUG}_head.onnx --threshold-out $DATA/artifacts/${WORD_SLUG}_head.json
 backup("artifacts")
 
 # %% [markdown]
@@ -425,5 +456,6 @@ files.download(f"{DATA}/artifacts/{slug}_head.json")
 #
 # - **PASS** (FA < 0.5/hr, FR < 5%): drop `<word>_head.onnx` + its `.json` (threshold + refractory) into the repo — the frozen backbone plus this head are a complete detector → Phase 5 (streaming runtime).
 # - **High FA**: more / harder negatives — most FAs are speech, so scale the **MSWC** speech set (B3) first; then rebuild the cache with a bigger preprocess `--n-bg-neg` (and more background files), or add more hard-neg phrases.
+# - **High imp-FA** (rhythm impostors false-firing): the word is being matched on cadence alone — enlarge `--rhythm-neg` (A4, more `--n-impostors`/`--n-clips`) and consider a word with a hard-to-fake high-band consonant (`s`/`ш`/`ц`/`ks`); a persistent gap means lean on the client-side second-stage gate (`hops_above` + `high_mel_energy` on each `Detection`).
 # - **High FR**: more positives (`--n-clips`) or augmentation variety (`--n-aug`); confirm the A1/A2 clips are on-phrase.
 # - With `--calib-bg` the FA/hr is the **streaming** rate over the **held-out** negative hours (B5) — add more held-out shards to resolve < 0.5/hr confidently. Without it, the per-clip estimate's resolution scales with the preprocess `--n-bg-neg` instead.

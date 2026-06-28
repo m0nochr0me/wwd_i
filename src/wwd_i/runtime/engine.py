@@ -53,6 +53,12 @@ WINDOW = 76
 # P(wake) to ~0 after the first seconds. tests/test_engine.py pins this to the train value.
 HEAD_CONTEXT_HOPS = 10
 
+# High-frequency mel bins summarized into ``Detection.high_mel_energy``: the top
+# HIGH_MEL_BINS of N_MELS (≈ the ≥3.5 kHz sibilant/fricative band at 32 mels over
+# 0-8 kHz). A voiced rhythm imposter has little energy there, so a client-side
+# second-stage gate can require it — it never affects the engine's own decision.
+HIGH_MEL_BINS = 8
+
 # Loudness normalization (AGC). The frozen backbone is strongly loudness-sensitive
 # — a -12 dB input level drop already halves the embedding's cosine similarity, and
 # heads are trained/calibrated on -20 dBFS audio (data.tts.rms_normalize) — so
@@ -115,11 +121,24 @@ def _low_cpu_options() -> ort.SessionOptions:
 class Detection:
     """A wake-word firing: ``word`` is which head fired (so multiple heads can
     drive different responses), ``time_s`` is the audio time at the end of the
-    window that triggered it, ``score`` is ``P(wake)`` at that hop."""
+    window that triggered it, ``score`` is ``P(wake)`` at that hop.
+
+    ``hops_above`` and ``high_mel_energy`` are extra evidence for an optional
+    client-side second-stage gate (the engine itself only applies threshold +
+    refractory). ``hops_above`` is how many of the trailing ``HEAD_CONTEXT_HOPS``
+    hops scored at/above this head's threshold — an N-of-M persistence count, so a
+    lone rhythm spike gives 1 while a sustained word gives several.
+    ``high_mel_energy`` is the mean log-mel energy of the top ``HIGH_MEL_BINS``
+    (high-frequency) bins over the firing window — a proxy for sibilant/fricative
+    frication that a voiced rhythm imposter (e.g. "мя-мя-мЯ") cannot fake. Both are
+    pure functions of the per-hop buffers, so they are identical streamed or
+    batched (the parity gate)."""
 
     word: str
     time_s: float
     score: float
+    hops_above: int = 1
+    high_mel_energy: float = 0.0
 
 
 def _packaged(name: str) -> str:
@@ -155,6 +174,7 @@ class _Head:
     def reset(self) -> None:
         self._last_fire_s = -math.inf
         self.last_score = 0.0  # most recent hop's P(wake), regardless of threshold (diagnostics)
+        self._recent: list[bool] = []  # trailing ≤HEAD_CONTEXT_HOPS above-threshold flags (N-of-M persistence)
 
     def _score(self, emb_buf: np.ndarray) -> float:
         """Max ``P(wake)`` over the trailing embeddings, from a ZERO GRU state —
@@ -169,14 +189,25 @@ class _Head:
             best = max(best, float(np.asarray(prob).reshape(-1)[0]))
         return best
 
-    def step(self, emb_buf: np.ndarray, t_end: float) -> Detection | None:
+    def step(self, emb_buf: np.ndarray, t_end: float, high_mel_energy: float) -> Detection | None:
         """Score the current window; fire (a Detection tagged with this word) when
-        above threshold and past the refractory window, else return None."""
+        above threshold and past the refractory window, else return None. Tracks
+        the trailing above-threshold flags so the Detection carries the N-of-M
+        persistence count (``hops_above``)."""
         score = self._score(emb_buf)
         self.last_score = score
-        if score >= self.threshold and (t_end - self._last_fire_s) >= self.refractory_s:
+        above = score >= self.threshold
+        self._recent.append(above)
+        self._recent = self._recent[-HEAD_CONTEXT_HOPS:]
+        if above and (t_end - self._last_fire_s) >= self.refractory_s:
             self._last_fire_s = t_end
-            return Detection(word=self.word, time_s=t_end, score=score)
+            return Detection(
+                word=self.word,
+                time_s=t_end,
+                score=score,
+                hops_above=sum(self._recent),
+                high_mel_energy=high_mel_energy,
+            )
         return None
 
 
@@ -279,6 +310,11 @@ class WakeWordEngine:
         """Most recent hop's max ``P(wake)`` across all heads (diagnostics)."""
         return max(h.last_score for h in self.heads)
 
+    @property
+    def last_high_mel_energy(self) -> float:
+        """Most recent hop's mean top-``HIGH_MEL_BINS`` log-mel energy (diagnostics)."""
+        return self._last_high_mel
+
     def reset(self) -> None:
         """Clear all streaming state — buffers, rolling embedding window, per-head timers."""
         self._mel = MelStreamer(self._mel_fn)
@@ -286,6 +322,7 @@ class WakeWordEngine:
         self._mel_buf = np.zeros((0, self._n_mels()), dtype=np.float32)
         self._emb_buf = np.zeros((0, self._emb_dim), dtype=np.float32)  # shared trailing HEAD_CONTEXT_HOPS embeddings
         self._hop = 0
+        self._last_high_mel = 0.0
         for head in self.heads:
             head.reset()
 
@@ -311,12 +348,15 @@ class WakeWordEngine:
             window = self._mel_buf[:WINDOW][None]  # [1, WINDOW, n_mels]
             emb = self._backbone.run(None, {self._bb_in: window})[0]  # [1, D] — embed once, shared by all heads
             self._emb_buf = np.concatenate([self._emb_buf, emb])[-HEAD_CONTEXT_HOPS:]
+            # high-band energy over the same window — shared, word-independent (second-stage-gate evidence)
+            high_mel = float(self._mel_buf[:WINDOW, -HIGH_MEL_BINS:].mean())
+            self._last_high_mel = high_mel
             t_end = (self._hop * MEL_FRAMES_PER_FRAME + WINDOW) * HOP_LENGTH / SAMPLE_RATE
             self._hop += 1
             self._mel_buf = self._mel_buf[MEL_FRAMES_PER_FRAME:]
 
             for head in self.heads:
-                det = head.step(self._emb_buf, t_end)
+                det = head.step(self._emb_buf, t_end, high_mel)
                 if det is not None:
                     dets.append(det)
         return dets

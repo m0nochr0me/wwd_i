@@ -21,6 +21,7 @@ from wwd_i.audio import file_frames, mic_frames
 from wwd_i.config import FRAME_MS, SAMPLE_RATE
 from wwd_i.export import build_identity_model
 from wwd_i.runtime import WakeWordEngine, load_session, run_stream
+from wwd_i.runtime.engine import HEAD_CONTEXT_HOPS
 
 DEFAULT_MODEL = Path("artifacts/identity.onnx")
 
@@ -52,7 +53,10 @@ def _run_detect(args: argparse.Namespace) -> int:
             count += 1
             for d in dets:
                 total += 1
-                print(f"  \N{HIGH VOLTAGE SIGN} {d.word!r} @ {d.time_s:6.2f}s  score={d.score:.3f}")
+                print(
+                    f"  \N{HIGH VOLTAGE SIGN} {d.word!r} @ {d.time_s:6.2f}s  score={d.score:.3f}  "
+                    f"hops={d.hops_above}/{HEAD_CONTEXT_HOPS}  hi-mel={d.high_mel_energy:+.2f}"
+                )
             if args.save is not None:
                 captured.append(np.asarray(frame, dtype=np.float32))
             if args.debug:
@@ -61,7 +65,10 @@ def _run_detect(args: argparse.Namespace) -> int:
                 if count % report_every == 0:
                     dbfs = 20 * np.log10(win_rms + 1e-9)
                     scores = "  ".join(f"{h.word!r}={w:.3f}" for w, h in zip(win_scores, engine.heads, strict=True))
-                    print(f"  [debug] input {dbfs:6.1f} dBFS  max P(wake) {scores}")
+                    print(
+                        f"  [debug] input {dbfs:6.1f} dBFS  hi-mel {engine.last_high_mel_energy:+.2f}  "
+                        f"max P(wake) {scores}"
+                    )
                     win_scores = [0.0] * len(engine.heads)
                     win_rms = 0.0
     except KeyboardInterrupt:  # pragma: no cover - interactive

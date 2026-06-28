@@ -42,10 +42,41 @@ def test_calibrate_stream_runs_real_engine_and_sweeps(tmp_path):
     eng = WakeWordEngine(head, threshold=0.0, refractory_s=0.0)
     res = calibrate_stream(eng, [neg], [pos], target_fa=0.5, target_fr=0.05, refractory=1.0)
 
-    assert set(res) == {"chosen", "det", "neg_hours"}
+    assert set(res) == {"chosen", "det", "neg_hours", "n_impostors"}
+    assert res["n_impostors"] == 0  # none passed -> no impostor_far column
+    assert all("impostor_far" not in r for r in res["det"])
     assert abs(res["neg_hours"] - 10 / 3600) < 1e-6  # FA/hr denominator is the true audio duration
     fa = [r["fa_per_hr"] for r in res["det"]]
     assert all(fa[i] >= fa[i + 1] for i in range(len(fa) - 1))  # FA non-increasing as threshold rises
     assert max(fa) > 0  # the always-firing head does cross on the negative stream
     # refractory of 1 s caps fires over a 10 s stream to ~10, not one-per-hop (~116)
     assert max(r["fa"] for r in res["det"]) <= 12
+
+
+def test_calibrate_stream_reports_rhythm_impostor_far(tmp_path):
+    """Held-out rhythm impostors get a per-threshold false-accept rate (not folded
+    into FA/hr), and target_impostor_far can gate the PASS verdict."""
+    pytest.importorskip("torch")
+    from test_engine import _toy_head
+
+    from wwd_i.runtime.engine import WakeWordEngine
+    from wwd_i.train.train_head import calibrate_stream
+
+    head = _toy_head(tmp_path / "head.onnx")  # fires high on any input
+    rng = np.random.default_rng(0)
+    for name, n in (("neg", SAMPLE_RATE * 10), ("pos", int(SAMPLE_RATE * 1.5)), ("imp", int(SAMPLE_RATE * 1.5))):
+        sf.write(str(tmp_path / f"{name}.wav"), (rng.standard_normal(n) * 0.1).astype(np.float32), SAMPLE_RATE)
+    neg, pos, imp = (tmp_path / f"{x}.wav" for x in ("neg", "pos", "imp"))
+
+    eng = WakeWordEngine(head, threshold=0.0, refractory_s=0.0)
+    res = calibrate_stream(eng, [neg], [pos], target_fa=0.5, target_fr=0.05, refractory=1.0, impostor_paths=[imp])
+
+    assert res["n_impostors"] == 1
+    assert all("impostor_far" in r and 0.0 <= r["impostor_far"] <= 1.0 for r in res["det"])
+    assert res["det"][0]["impostor_far"] == 1.0  # always-firing head fires on the impostor at low thr
+
+    # an impossible impostor target can never PASS, even where FA/FR would
+    gated = calibrate_stream(
+        eng, [neg], [pos], target_fa=0.5, target_fr=0.05, refractory=1.0, impostor_paths=[imp], target_impostor_far=0.0
+    )
+    assert gated["chosen"]["passed"] is False

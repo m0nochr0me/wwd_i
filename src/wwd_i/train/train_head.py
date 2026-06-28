@@ -13,6 +13,7 @@ See docs/architecture.md §6-§7 and implementation-plan.md Phase 4.
 import argparse
 import copy
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
@@ -124,6 +125,13 @@ def build_embeddings(
         hard = _augmented(sorted(Path(args.hard_neg).rglob("*.wav")), aug, args.n_aug, length)
         if hard:
             neg_parts.append(embed_clips(hard, session))
+    if args.rhythm_neg:
+        # rhythm-impostor babble (nonsense at the wake-word cadence) as TRAINING negatives, so the
+        # head learns to reject rhythm-only matches. Held-out eval impostors live elsewhere (--rhythm-impostors).
+        rhythm = _augmented(sorted(Path(args.rhythm_neg).rglob("*.wav")), aug, args.n_aug, length)
+        if rhythm:
+            print(f"  + {len(rhythm)} rhythm-impostor training negatives")
+            neg_parts.append(embed_clips(rhythm, session))
     if args.bg_neg_emb:
         cache = np.load(args.bg_neg_emb)
         if cache.shape[1:] != pos_emb.shape[1:]:
@@ -136,7 +144,7 @@ def build_embeddings(
         bg = sample_background_clips(aug.pool, args.n_bg_neg, length=length, seed=args.seed)
         neg_parts.append(embed_clips([fixed_length(aug(c), length) for c in bg], session))
     if not neg_parts:
-        raise RuntimeError("no negatives — pass --bg-neg-emb and/or --background and/or --hard-neg")
+        raise RuntimeError("no negatives — pass --bg-neg-emb and/or --background and/or --hard-neg and/or --rhythm-neg")
 
     neg_emb = np.concatenate(neg_parts, axis=0)
     x = np.concatenate([pos_emb, neg_emb], axis=0)
@@ -182,6 +190,8 @@ def calibrate_stream(
     target_fa: float,
     target_fr: float,
     refractory: float,
+    impostor_paths: Sequence[Path] = (),
+    target_impostor_far: float | None = None,
 ) -> dict:
     """Calibrate by running the actual streaming engine, not isolated clips.
 
@@ -193,17 +203,30 @@ def calibrate_stream(
     thresholds offline applying the real refractory debounce. FA/hr is fires over the
     true negative audio duration; FR is the fraction of positive utterances that never
     fire. Same return shape as ``calibrate`` so the reporting/gate code is shared.
+
+    ``impostor_paths`` are held-out rhythm-impostor clips (nonsense babble at the
+    wake-word cadence — see ``data.confusables.generate_rhythm_impostors``). They
+    are short clips, not continuous recordings, so they are NOT folded into the
+    duration-weighted FA/hr; instead each swept threshold gets ``impostor_far`` —
+    the fraction of impostor clips that false-fire — surfacing the rhythm-only
+    trigger the continuous FA set usually can't see. Set ``target_impostor_far`` to
+    also require it for the PASS gate (and to bias the chosen threshold toward
+    suppressing impostors); leave it ``None`` to report ``impostor_far`` only.
     """
     if not neg_paths:
         raise RuntimeError("calibrate_stream: no negative audio files")
-    neg_streams: list[np.ndarray] = []  # per file: [hops, 2] = (time_s, score)
-    neg_seconds = 0.0
-    for p in neg_paths:
-        wav = load_wav(p)
-        neg_seconds += len(wav) / SAMPLE_RATE
-        engine.reset()
-        dets = engine.push(wav)
-        neg_streams.append(np.array([[d.time_s, d.score] for d in dets], dtype=np.float64).reshape(-1, 2))
+
+    def _stream(paths: list[Path]) -> list[np.ndarray]:  # per file: [hops, 2] = (time_s, score)
+        streams = []
+        for p in paths:
+            engine.reset()
+            dets = engine.push(load_wav(p))
+            streams.append(np.array([[d.time_s, d.score] for d in dets], dtype=np.float64).reshape(-1, 2))
+        return streams
+
+    neg_seconds = sum(len(load_wav(p)) / SAMPLE_RATE for p in neg_paths)
+    neg_streams = _stream(neg_paths)
+    imp_streams = _stream(list(impostor_paths))
 
     pos_best: list[float] = []
     for p in pos_paths:
@@ -218,11 +241,23 @@ def calibrate_stream(
         fr = float(np.mean(pos < thr)) if len(pos) else 1.0
         fa = sum(_count_fires(s[:, 0], s[:, 1], float(thr), refractory) for s in neg_streams)
         fa_per_hr = fa / neg_hours if neg_hours else 0.0
-        det.append({"threshold": round(float(thr), 3), "fr": fr, "fa_per_hr": fa_per_hr, "fa": fa})
-    feasible = [r for r in det if r["fa_per_hr"] < target_fa]
+        row = {"threshold": round(float(thr), 3), "fr": fr, "fa_per_hr": fa_per_hr, "fa": fa}
+        if imp_streams:
+            fired = sum(_count_fires(s[:, 0], s[:, 1], float(thr), refractory) > 0 for s in imp_streams)
+            row["impostor_far"] = fired / len(imp_streams)
+        det.append(row)
+    feasible = [
+        r
+        for r in det
+        if r["fa_per_hr"] < target_fa
+        and (target_impostor_far is None or r.get("impostor_far", 0.0) < target_impostor_far)
+    ]
     chosen = min(feasible, key=lambda r: r["fr"]) if feasible else max(det, key=lambda r: r["threshold"])
-    chosen["passed"] = bool(chosen["fa_per_hr"] < target_fa and chosen["fr"] < target_fr)
-    return {"chosen": chosen, "det": det, "neg_hours": neg_hours}
+    passed = chosen["fa_per_hr"] < target_fa and chosen["fr"] < target_fr
+    if target_impostor_far is not None:
+        passed = passed and chosen.get("impostor_far", 0.0) < target_impostor_far
+    chosen["passed"] = bool(passed)
+    return {"chosen": chosen, "det": det, "neg_hours": neg_hours, "n_impostors": len(imp_streams)}
 
 
 def _fit(head: WakeHead, x: torch.Tensor, y: torch.Tensor, tr: np.ndarray, val: np.ndarray, args) -> None:
@@ -258,6 +293,8 @@ def _fit(head: WakeHead, x: torch.Tensor, y: torch.Tensor, tr: np.ndarray, val: 
 
 
 def train(args: argparse.Namespace) -> None:
+    if args.rhythm_impostors and not args.calib_bg:
+        raise RuntimeError("--rhythm-impostors needs --calib-bg (it is evaluated by the streaming calibration)")
     torch.manual_seed(args.seed)
     pool = load_background_pool(args.background, max_clips=args.max_bg, seed=args.seed) if args.background else []
     aug = Augmenter(pool, seed=args.seed)
@@ -284,15 +321,27 @@ def train(args: argparse.Namespace) -> None:
         if not neg_paths:
             raise RuntimeError(f"--calib-bg has no audio files under {args.calib_bg}")
         pos_paths = sorted(Path(args.positives).rglob("*.wav"))
+        impostor_paths = find_audio(args.rhythm_impostors) if args.rhythm_impostors else []
+        if args.rhythm_impostors and not impostor_paths:
+            raise RuntimeError(f"--rhythm-impostors has no audio files under {args.rhythm_impostors}")
         # threshold 0 + zero refractory => push() returns every hop; calibrate_stream
         # re-thresholds offline with the real --refractory. backbone_path=args.backbone so
         # calibration runs against the SAME backbone the head was embedded on — incl. an int8
         # one (Phase-6 re-gate: --backbone backbone.int8.onnx), not the packaged default.
         engine = WakeWordEngine(args.out, threshold=0.0, refractory_s=0.0, backbone_path=args.backbone)
         result = calibrate_stream(
-            engine, neg_paths, pos_paths, target_fa=args.target_fa, target_fr=args.target_fr, refractory=args.refractory
+            engine,
+            neg_paths,
+            pos_paths,
+            target_fa=args.target_fa,
+            target_fr=args.target_fr,
+            refractory=args.refractory,
+            impostor_paths=impostor_paths,
+            target_impostor_far=args.target_impostor_far,
         )
         calib_label = f"streaming, {result['neg_hours']:.2f} h continuous negatives ({len(neg_paths)} files)"
+        if impostor_paths:
+            calib_label += f" + {len(impostor_paths)} rhythm impostors"
     else:
         with torch.no_grad():
             test_prob = torch.sigmoid(head.clip_logits(x[test])).cpu().numpy()
@@ -303,11 +352,14 @@ def train(args: argparse.Namespace) -> None:
     print(f"\nDET ({calib_label}):")
     for r in result["det"]:
         mark = "  <-- chosen" if r is c else ""
-        print(f"  thr {r['threshold']:.3f} | FR {r['fr']:.3f} | FA {r['fa_per_hr']:.2f}/hr{mark}")
+        imp = f" | imp-FA {r['impostor_far']:.2f}" if "impostor_far" in r else ""
+        print(f"  thr {r['threshold']:.3f} | FR {r['fr']:.3f} | FA {r['fa_per_hr']:.2f}/hr{imp}{mark}")
     verdict = "PASS" if c["passed"] else "FAIL"
+    gate_extra = f", imp-FA {c['impostor_far']:.2f}" if "impostor_far" in c else ""
+    imp_target = f", imp-FA<{args.target_impostor_far}" if args.target_impostor_far is not None else ""
     print(
-        f"\n[gate] thr {c['threshold']:.3f} -> FA {c['fa_per_hr']:.2f}/hr, FR {c['fr']:.3f} "
-        f"(targets FA<{args.target_fa}/hr, FR<{args.target_fr}) {verdict}"
+        f"\n[gate] thr {c['threshold']:.3f} -> FA {c['fa_per_hr']:.2f}/hr, FR {c['fr']:.3f}{gate_extra} "
+        f"(targets FA<{args.target_fa}/hr, FR<{args.target_fr}{imp_target}) {verdict}"
     )
     meta = {
         "word": args.word,
@@ -317,6 +369,8 @@ def train(args: argparse.Namespace) -> None:
         "fr": c["fr"],
         "passed": c["passed"],
     }
+    if "impostor_far" in c:
+        meta["impostor_far"] = c["impostor_far"]
     Path(args.threshold_out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.threshold_out).write_text(json.dumps(meta, indent=2))
     print(f"done | head {args.out} | calibration {args.threshold_out}")
@@ -327,6 +381,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--word", default="wake", help="label for the calibration metadata")
     p.add_argument("--positives", required=True, help="dir of wake-phrase wavs (TTS)")
     p.add_argument("--hard-neg", help="dir of near-phrase wavs (TTS hard negatives)")
+    p.add_argument(
+        "--rhythm-neg",
+        help="dir of rhythm-impostor wavs (nonsense babble at the wake-word cadence) added to TRAINING negatives so "
+        "the head rejects rhythm-only matches. Keep disjoint from --rhythm-impostors (the held-out eval set).",
+    )
     p.add_argument("--background", nargs="*", help="dirs of background audio for augmentation noise (e.g. noise_pool)")
     p.add_argument(
         "--calib-bg",
@@ -336,6 +395,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--bg-neg-emb", help="pre-embedded background negatives .npy from preprocess_bg (bypasses --n-bg-neg)"
+    )
+    p.add_argument(
+        "--rhythm-impostors",
+        help="dir of HELD-OUT rhythm-impostor wavs (nonsense babble at the wake-word cadence; generate with "
+        "`elevenlabs --rhythm-impostors-for`). Reports the fraction that false-fire at each threshold. Needs --calib-bg.",
+    )
+    p.add_argument(
+        "--target-impostor-far",
+        type=float,
+        default=None,
+        help="if set, also require the rhythm-impostor false-accept rate < this for the gate to PASS",
     )
     p.add_argument("--backbone", default=_default_backbone(), help="frozen backbone.onnx")
     p.add_argument("--n-aug", type=int, default=5, help="augmented variants per TTS clip")

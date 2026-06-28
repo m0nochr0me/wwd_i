@@ -159,6 +159,18 @@ def main() -> None:
         metavar="N",
         help="with --hard-negs-for: also fetch N acoustic confusables from Gemini (needs GEMINI_API_KEY)",
     )
+    p.add_argument(
+        "--rhythm-impostors-for",
+        help="instead synthesize rhythm-impostor babble (nonsense at the wake-word cadence) for this wake phrase — "
+        "a held-out FA-eval set for `train_head --rhythm-impostors`. Needs GEMINI_API_KEY; use a small --n-clips.",
+    )
+    p.add_argument(
+        "--n-impostors",
+        type=int,
+        default=20,
+        metavar="N",
+        help="with --rhythm-impostors-for: number of impostor strings to fetch from Gemini",
+    )
     p.add_argument("--out", required=True, help="output dir for the cached wavs")
     p.add_argument("--n-clips", type=int, default=300)
     p.add_argument("--model", default=DEFAULT_MODEL)
@@ -166,11 +178,20 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--smoke", action="store_true", help="synthesize a single clip to validate the SDK, then exit")
     args = p.parse_args()
-    if not (args.phrase or args.hard_negs_for):
-        p.error("pass --phrase or --hard-negs-for")
+    if not (args.phrase or args.hard_negs_for or args.rhythm_impostors_for):
+        p.error("pass --phrase, --hard-negs-for, or --rhythm-impostors-for")
 
     backend = ElevenLabsBackend(model=args.model, max_voices=args.max_voices)
     common = {"n_clips": args.n_clips, "seed": args.seed}
+    if args.rhythm_impostors_for:
+        from wwd_i.data.confusables import generate_rhythm_impostors
+
+        phrases = generate_rhythm_impostors(args.rhythm_impostors_for, n=args.n_impostors)
+        print(f"{len(phrases)} rhythm impostors: {', '.join(phrases)}")
+        written = [c for ph in phrases for c in generate_clips(ph, args.out, backend, **common)]
+        print(f"wrote {len(written)} rhythm-impostor clips across {len(phrases)} phrases under {args.out}")
+        return
+
     if args.hard_negs_for:
         from wwd_i.data.negatives import hard_negative_phrases
 
