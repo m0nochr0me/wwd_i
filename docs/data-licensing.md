@@ -68,6 +68,18 @@ seam.
   differs by tier (the free tier may use your content to improve Google's products;
   paid does not). Confirm the current [Gemini API Additional Terms](https://ai.google.dev/gemini-api/terms)
   permit training a head for your tier before distributing one.
+- **Groq Orpheus (`data/groq_tts.py`) is opt-in — verify Groq's terms.** The
+  underlying [Orpheus](https://huggingface.co/canopylabs) weights are **Apache-2.0**
+  (which permits training on output), but access here is via Groq's hosted API, so
+  Groq's [Terms of Service](https://groq.com/terms-of-use/) govern the generated
+  audio. Confirm they permit training a head before distributing one; self-hosting the
+  Apache-2.0 weights via `LocalTtsBackend` avoids the hosted-API terms entirely.
+- **Deepdub (`data/deepdub_tts.py`) is opt-in and restricted.** Deepdub is a
+  commercial voice-cloning / dubbing service; like ElevenLabs, assume its
+  [Terms of Service](https://deepdub.ai/terms-of-service) do **not** permit using its
+  output (especially cloned-voice output) to train ML models unless you have a written
+  agreement that covers it. Don't use this backend for distributed heads without
+  confirming the terms; prefer a permissive local TTS.
 - **A permissively-licensed local TTS keeps the pipeline clean end-to-end.**
   Implement `LocalTtsBackend` (`data/local_tts.py`) on **Kokoro** (Apache-2.0),
   **Piper** (MIT), or **Parler-TTS** (Apache-2.0) — all permit training on output.

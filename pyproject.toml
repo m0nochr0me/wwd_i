@@ -23,6 +23,12 @@ requires = ["uv_build>=0.10.9,<0.12.0"]
 build-backend = "uv_build"
 
 
+[tool.uv]
+# audiosample (transitive via deepdub) caps numpy<=2.2.0 in stale metadata but runs
+# fine on the project's numpy 2.4.x (verified live). Override the ceiling so the train
+# group resolves; numpy stays pinned >=2.4.6 by [project].dependencies above.
+override-dependencies = ["numpy>=2.4.6"]
+
 # torch/torchaudio are training/export-only (CPU build for local dev; Colab
 # provides its own CUDA build). Inference ships with onnxruntime alone.
 [[tool.uv.index]]
@@ -48,6 +54,8 @@ train = [
     "datasets>=2.20.0,<4.0.0",  # MSWC ships a loading script; datasets>=4 dropped script support
     "elevenlabs>=1.0",  # Phase-3 TTS sample generation (Colab-side; never shipped)
     "google-genai>=1.0",  # Phase-3 acoustic confusables via Gemini (Colab-side; never shipped)
+    "groq>=1.0",  # Phase-3 Orpheus TTS sample generation (Colab-side; never shipped)
+    "deepdub>=0.1.21",  # Phase-3 Deepdub TTS sample generation (Colab-side; never shipped)
     "onnxscript>=0.7.0",
     "torch>=2.12.0",
     "torchaudio>=2.11.0",

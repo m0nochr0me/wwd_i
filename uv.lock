@@ -11,6 +11,9 @@ resolution-markers = [
     "platform_machine == 's390x' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
+[manifest]
+overrides = [{ name = "numpy", specifier = ">=2.4.6" }]
+
 [[package]]
 name = "aiohappyeyeballs"
 version = "2.6.2"
@@ -145,6 +148,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/9a/8e/82a0fe20a541c03148528be8cac2408564a6c9a0cc7e9171802bc1d26985/attrs-26.1.0.tar.gz", hash = "sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32", size = 952055, upload-time = "2026-03-19T14:22:25.026Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309", size = 67548, upload-time = "2026-03-19T14:22:23.645Z" },
+]
+
+[[package]]
+name = "audiosample"
+version = "2.2.12"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0b/a0/cc726d93b01df8306f081fd0b6f9d93746aac7c210dbf917d2accfa645c3/audiosample-2.2.12.tar.gz", hash = "sha256:7a4b243524761b29c9cfc20b6cbec2fb0b277ca0bfe61f4a2a341a15529c7ee6", size = 55281, upload-time = "2026-01-06T03:19:59.516Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/11/925a98afb216b3da21c60ea2080c180f02af509ef1e55dfcff04a18182b5/audiosample-2.2.12-py3-none-any.whl", hash = "sha256:373a2e393e1591739f67adbc6ca95d86b00e5ec3c4abb6d02f09522bda93e78a", size = 46488, upload-time = "2026-01-06T03:19:57.82Z" },
 ]
 
 [[package]]
@@ -366,6 +381,21 @@ wheels = [
 ]
 
 [[package]]
+name = "deepdub"
+version = "0.1.28"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "audiosample" },
+    { name = "click" },
+    { name = "requests" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/83/05/023ea381c3f782da9a28fd6fecfca969aca576aa4b49fcc340652c0cbd67/deepdub-0.1.28.tar.gz", hash = "sha256:29bf3d4601b47662ad591d6ac86ce608ef120fe9b66bce3bc6d5d36f2cfc3f29", size = 11104, upload-time = "2026-06-11T05:31:55.574Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9f/b4/af6cf91acc6104fc48dae2633fc9a1754cd924cd6e3b05ab384b59825349/deepdub-0.1.28-py3-none-any.whl", hash = "sha256:0edf4c8f8bf098d36aa0e91c1e16b0d6da5dcf3f4c1a7a91e30e3e10606a04f5", size = 10437, upload-time = "2026-06-11T05:31:54.175Z" },
+]
+
+[[package]]
 name = "dill"
 version = "0.3.8"
 source = { registry = "https://pypi.org/simple" }
@@ -536,6 +566,23 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/51/75/81c01294db3a3005dc8a807ed889a10ecd66ef89462c118adcffa5f7981c/google_genai-2.9.0.tar.gz", hash = "sha256:a8a10e9113f460cc668c1d9deeb62ba393ad1ba704bf3166d5a0f32a434f9415", size = 595700, upload-time = "2026-06-19T08:23:42.718Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a3/17/bb2cdd0a6c6fec32f14e85735917d1052f82430b1de58c2b606740740419/google_genai-2.9.0-py3-none-any.whl", hash = "sha256:2a79e2b08e8439f5f25c2b42f98e3f3e8ea4be9c9265f5d7321580dbaf2764f4", size = 950790, upload-time = "2026-06-19T08:23:40.995Z" },
+]
+
+[[package]]
+name = "groq"
+version = "1.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0b/3a/31c54e35d694ba9c263939ecae0874c78fc51f22b9fb13d2dab50edf6e3c/groq-1.5.0.tar.gz", hash = "sha256:8648388f8668629490bb0eab11252b4cc43316149fda9c6343e9a9577fe7df88", size = 158239, upload-time = "2026-06-21T22:57:30.202Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/c3/cac2aee75198c0382a2e6070619a798de2288e01850abb6e999746bb92e3/groq-1.5.0-py3-none-any.whl", hash = "sha256:a927fd75b4a60cb066c408cb4f9647536caf74e241ea75bc57d1810501b8203f", size = 143690, upload-time = "2026-06-21T22:57:29.213Z" },
 ]
 
 [[package]]
@@ -2048,8 +2095,10 @@ dev = [
 ]
 train = [
     { name = "datasets" },
+    { name = "deepdub" },
     { name = "elevenlabs" },
     { name = "google-genai" },
+    { name = "groq" },
     { name = "onnxscript" },
     { name = "torch", version = "2.12.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "platform_machine != 's390x' and sys_platform == 'darwin'" },
     { name = "torch", version = "2.12.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "platform_machine == 's390x' or sys_platform != 'darwin'" },
@@ -2077,8 +2126,10 @@ dev = [
 ]
 train = [
     { name = "datasets", specifier = ">=2.20.0,<4.0.0" },
+    { name = "deepdub", specifier = ">=0.1.21" },
     { name = "elevenlabs", specifier = ">=1.0" },
     { name = "google-genai", specifier = ">=1.0" },
+    { name = "groq", specifier = ">=1.0" },
     { name = "onnxscript", specifier = ">=0.7.0" },
     { name = "torch", specifier = ">=2.12.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torchaudio", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cpu" },
