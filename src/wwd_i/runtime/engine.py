@@ -188,14 +188,20 @@ class _Head:
 
     def reset(self) -> None:
         self._last_fire_s = -math.inf
-        self.last_score = 0.0  # most recent hop's P(wake), regardless of threshold (diagnostics)
+        self.last_score = 0.0  # most recent hop's P(wake) (top-k mean — the fire criterion), regardless of threshold
+        self.last_max_score = 0.0  # most recent hop's top-1 (max-over-time) P(wake) — dilution diagnostic only
         self._recent: list[bool] = []  # trailing ≤HEAD_CONTEXT_HOPS above-threshold flags (N-of-M persistence)
 
     def _score(self, emb_buf: np.ndarray) -> float:
         """Top-``HEAD_TOPK``-mean ``P(wake)`` over the trailing embeddings, from a
         ZERO GRU state — the exact criterion the head was trained on
         (``train_head.clip_score``). Re-running from zero each hop is deliberate;
-        carrying state across the stream collapses ``P(wake)`` (see ``HEAD_CONTEXT_HOPS``)."""
+        carrying state across the stream collapses ``P(wake)`` (see ``HEAD_CONTEXT_HOPS``).
+
+        Side-effect: stashes the top-1 (max-over-time) of the same per-hop probs in
+        ``self.last_max_score`` — a diagnostic only (never used to fire). top-1 high
+        while the returned top-k mean is low means a real response too brief to hold
+        ``HEAD_TOPK`` hops, so the top-k-mean criterion dilutes it below threshold."""
         h = np.zeros((1, 1, self.hidden), dtype=np.float32)
         probs: list[float] = []
         for e in emb_buf:
@@ -204,6 +210,7 @@ class _Head:
                 {self._emb_in: e[None, None].astype(np.float32), self._h_in: h},
             )
             probs.append(float(np.asarray(prob).reshape(-1)[0]))
+        self.last_max_score = max(probs) if probs else 0.0
         if not probs:
             return 0.0
         k = min(HEAD_TOPK, len(probs))
@@ -328,6 +335,15 @@ class WakeWordEngine:
     def last_score(self) -> float:
         """Most recent hop's max ``P(wake)`` across all heads (diagnostics)."""
         return max(h.last_score for h in self.heads)
+
+    @property
+    def last_max_score(self) -> float:
+        """Most recent hop's top-1 (max-over-time) ``P(wake)`` across heads (diagnostics).
+
+        Companion to :attr:`last_score` (the top-``HEAD_TOPK`` mean that actually fires):
+        a high ``last_max_score`` with a low ``last_score`` is the signature of a real but
+        too-brief response that the top-k-mean criterion dilutes below threshold."""
+        return max(h.last_max_score for h in self.heads)
 
     @property
     def last_high_mel_energy(self) -> float:

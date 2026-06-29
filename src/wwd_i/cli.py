@@ -21,7 +21,7 @@ from wwd_i.audio import file_frames, mic_frames
 from wwd_i.config import FRAME_MS, SAMPLE_RATE
 from wwd_i.export import build_identity_model
 from wwd_i.runtime import WakeWordEngine, load_session, run_stream
-from wwd_i.runtime.engine import HEAD_CONTEXT_HOPS
+from wwd_i.runtime.engine import HEAD_CONTEXT_HOPS, HEAD_TOPK
 
 DEFAULT_MODEL = Path("artifacts/identity.onnx")
 
@@ -43,7 +43,8 @@ def _run_detect(args: argparse.Namespace) -> int:
     report_every = max(1, round(1000 / FRAME_MS))  # ~1 s of frames between --debug lines
     captured: list[np.ndarray] = []
     count, compute, total = 0, 0.0, 0
-    win_scores = [0.0] * len(engine.heads)  # per-head running max P(wake) since the last --debug report
+    win_scores = [0.0] * len(engine.heads)  # per-head running max top-k-mean P(wake) since the last --debug report
+    win_max = [0.0] * len(engine.heads)  # per-head running max top-1 (max-over-time) P(wake) — dilution diagnostic
     win_rms = 0.0
     try:
         for frame in frames:
@@ -62,14 +63,19 @@ def _run_detect(args: argparse.Namespace) -> int:
             if args.debug:
                 win_rms = max(win_rms, float(np.sqrt(np.mean(np.square(frame, dtype=np.float64)))))
                 win_scores = [max(w, h.last_score) for w, h in zip(win_scores, engine.heads, strict=True)]
+                win_max = [max(w, h.last_max_score) for w, h in zip(win_max, engine.heads, strict=True)]
                 if count % report_every == 0:
                     dbfs = 20 * np.log10(win_rms + 1e-9)
-                    scores = "  ".join(f"{h.word!r}={w:.3f}" for w, h in zip(win_scores, engine.heads, strict=True))
+                    scores = "  ".join(
+                        f"{h.word!r}=top{HEAD_TOPK} {w:.3f} top1 {m:.3f}"
+                        for w, m, h in zip(win_scores, win_max, engine.heads, strict=True)
+                    )
                     print(
                         f"  [debug] input {dbfs:6.1f} dBFS  hi-mel {engine.last_high_mel_energy:+.2f}  "
                         f"max P(wake) {scores}"
                     )
                     win_scores = [0.0] * len(engine.heads)
+                    win_max = [0.0] * len(engine.heads)
                     win_rms = 0.0
     except KeyboardInterrupt:  # pragma: no cover - interactive
         print("\nstopped")

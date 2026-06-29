@@ -363,21 +363,28 @@ else:
 # %% [markdown]
 # ### B3½. Continuous conversational-speech negatives (the YouTube-style FA lever)
 #
-# MSWC (B3) is **single words**; the false accepts you actually hit come from **continuous** speech — conversation, TV, a YouTube video playing nearby — where the sliding window lands on word *boundaries* and co-articulations that single words never show. This streams **sentence-length** speech from a conversational corpus into the same `bg_neg.npy` cache (each multi-second clip yields several overlapping crops in Part B½), tightening the boundary against exactly the audio that triggers in the field. Swap `--dataset` for your locale/content (`--inspect` lists a set's audio column); skipped if the cache already exists.
+# MSWC (B3) is **single words**; the false accepts you actually hit come from **continuous** speech — conversation, TV, a YouTube video playing nearby — where the sliding window lands on word *boundaries* and co-articulations that single words never show. This streams **sentence-length** speech from a conversational corpus into the same `bg_neg.npy` cache (each multi-second clip yields several overlapping crops in Part B½), tightening the boundary against exactly the audio that triggers in the field. The default `MLCommons/peoples_speech` **requires `--config`** (`clean` or `dirty`); the cell smoke-tests decoding with `--inspect` first, and if a corpus stores audio as external paths (this puller decodes embedded bytes only) it falls back to more YouTube-sourced **AudioSet** shards. Skipped if the cache already exists.
 
 # %%
 # Continuous-speech negatives (sentence-length, conversational) folded into the SAME bg cache.
 # MSWC is single WORDS; field false-accepts are CONTINUOUS speech (conversation/TV/YouTube), where the
 # window straddles word boundaries MSWC never shows. Each multi-second clip -> several crops in Part B½.
 # Materialized under $DATA/bg/media_speech so `preprocess_bg --background $DATA/bg` picks it up.
-# Default corpus = MLCommons/peoples_speech (diverse real-world English); swap --dataset for your
-# locale/content, and run with --inspect first if unsure of the audio column. Skipped if the cache exists.
+# Default corpus = MLCommons/peoples_speech, which REQUIRES --config: `clean` (read speech) or `dirty`
+# (noisier/spontaneous -> closer to field audio). The smoke line below (--inspect) streams ONE example
+# and decode-checks it: if it prints `decode FAILED` / `bytes=no`, that corpus stores audio as external
+# paths this puller can't fetch -> fall back to more AudioSet shards (B1-style; AudioSet is itself
+# YouTube-sourced, so it matches YT-style FAs well). Skipped if the cache exists.
 if os.path.exists(f"{DATA}/bg_neg.npy") or os.path.exists(f"{DRIVE}/bg_neg.npy"):
     print("bg_neg cache present — skipping continuous-speech negatives")
 else:
     # !uv pip install --python .venv/bin/python 'datasets<4'
-    # !.venv/bin/python -m wwd_i.data.hf_audio --dataset MLCommons/peoples_speech --n-clips 4000 --seed 0 --out $DATA/bg/media_speech --min-seconds 2 --max-stream 200000
+    # smoke-test the corpus decodes before the full pull (prints the audio column + a decode check):
+    # !.venv/bin/python -m wwd_i.data.hf_audio --dataset MLCommons/peoples_speech --config clean --inspect
+    # !.venv/bin/python -m wwd_i.data.hf_audio --dataset MLCommons/peoples_speech --config clean --n-clips 4000 --seed 0 --out $DATA/bg/media_speech --min-seconds 2 --max-stream 200000
     # !echo "continuous-speech clips:"; find $DATA/bg/media_speech -name '*.wav' | wc -l
+    # Fallback if the corpus doesn't decode: copy the B1 wget/tar line for more YouTube-sourced AudioSet
+    # shards (bal_train05/06/07, disjoint from B1's 09 and B5's 08) into $DATA/bg/audioset.
 
 # %% [markdown]
 # ### B4. Vocal bursts (cough / laugh / breath) — non-speech false-accept triggers
