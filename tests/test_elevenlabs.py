@@ -62,8 +62,8 @@ def test_balanced_voice_ids_even_spread():
 def test_backend_variants_and_synthesize_decode():
     captured = []
 
-    def fake_synth(client, text, voice_id, *, model, stability, style, similarity):
-        captured.append((text, voice_id, model, stability, style, similarity))
+    def fake_synth(client, text, voice_id, *, model, stability, style, similarity, speed):
+        captured.append((text, voice_id, model, stability, style, similarity, speed))
         return _sine_pcm()
 
     backend = ElevenLabsBackend(client=_FakeClient([f"v{i}" for i in range(5)]), synthesize=fake_synth)
@@ -101,21 +101,21 @@ def test_backend_skips_unusable_voice_through_generate_clips(tmp_path):
     bad = "v3"
     calls = []
 
-    def fake_synth(client, text, voice_id, *, model, stability, style, similarity):
+    def fake_synth(client, text, voice_id, *, model, stability, style, similarity, speed):
         calls.append(voice_id)
         if voice_id == bad:
             raise _ApiError(400, "not fine-tuned", status="voice_not_fine_tuned")
         return _sine_pcm()
 
     backend = ElevenLabsBackend(client=_FakeClient([f"v{i}" for i in range(5)]), synthesize=fake_synth)
-    # n_clips == full grid (5 voices x 3 x 3 x 3 = 135) -> every voice drawn, so the bad one is hit.
-    paths = generate_clips("hey computer", tmp_path, backend, n_clips=135, seed=0)
+    # n_clips == full grid (5 voices x 3 x 3 x 3 x 3 = 405) -> every voice drawn, so the bad one is hit.
+    paths = generate_clips("hey computer", tmp_path, backend, n_clips=405, seed=0)
     assert calls.count(bad) == 1  # attempted once, then blacklisted for the rest of the batch
-    assert len(paths) == 4 * 27  # only the 4 good voices x 27 setting combos were written
+    assert len(paths) == 4 * 81  # only the 4 good voices x 81 setting combos were written
 
 
 def test_backend_reraises_non_voice_error(tmp_path):
-    def fake_synth(client, text, voice_id, *, model, stability, style, similarity):
+    def fake_synth(client, text, voice_id, *, model, stability, style, similarity, speed):
         raise _ApiError(401, "invalid api key", status="invalid_api_key")
 
     backend = ElevenLabsBackend(client=_FakeClient([f"v{i}" for i in range(3)]), synthesize=fake_synth)

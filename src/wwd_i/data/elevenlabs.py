@@ -1,7 +1,7 @@
 """ElevenLabs v3 TTS backend (Phase 3) — opt-in.
 
 Synthesizes diverse spoken renderings of a phrase — voices balanced across
-gender/age/accent, crossed with stability/style/similarity settings. The generic
+gender/age/accent, crossed with stability/style/similarity/speed settings. The generic
 machinery (caching, normalization, file layout, per-voice skip) lives in
 ``tts.py``; this module is just the ElevenLabs ``TtsBackend``: list voices,
 spread the prosody grid, and call the SDK.
@@ -30,6 +30,7 @@ PCM_FORMAT = "pcm_16000"  # raw s16le mono @ 16 kHz — no resample needed
 STABILITIES = (0.0, 0.5, 1.0)  # eleven_v3 only accepts discrete stability: Creative / Natural / Robust
 STYLES = (0.0, 0.3, 0.6)
 SIMILARITIES = (0.3, 0.6, 0.9)  # adherence to the source voice — low/mid/high gives extra timbral spread
+SPEEDS = (0.9, 1.0, 1.1)  # speaking rate; API range 0.7–1.2 (1.0 = default), moderate to avoid quality loss
 
 
 def _client():  # pragma: no cover - thin SDK seam
@@ -72,7 +73,7 @@ def _balanced_voice_ids(voices, max_voices: int, seed: int) -> list[str]:
 
 
 def _synthesize(
-    client, text: str, voice_id: str, *, model: str, stability: float, style: float, similarity: float
+    client, text: str, voice_id: str, *, model: str, stability: float, style: float, similarity: float, speed: float
 ) -> bytes:  # pragma: no cover - thin SDK seam
     from elevenlabs import VoiceSettings
 
@@ -81,7 +82,7 @@ def _synthesize(
         text=text,
         model_id=model,
         output_format=PCM_FORMAT,
-        voice_settings=VoiceSettings(stability=stability, similarity_boost=similarity, style=style),
+        voice_settings=VoiceSettings(stability=stability, similarity_boost=similarity, style=style, speed=speed),
     )
     return b"".join(audio)  # the SDK streams byte chunks
 
@@ -109,9 +110,16 @@ def _pcm16_to_float(pcm: bytes) -> np.ndarray:
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
 
 
-def _variants(n_clips: int, voice_ids: list[str], seed: int) -> list[tuple[str, float, float, float]]:
-    """Spread ``n_clips`` over a shuffled voice × stability × style × similarity grid."""
-    grid = [(v, st, sy, si) for v in voice_ids for st in STABILITIES for sy in STYLES for si in SIMILARITIES]
+def _variants(n_clips: int, voice_ids: list[str], seed: int) -> list[tuple[str, float, float, float, float]]:
+    """Spread ``n_clips`` over a shuffled voice × stability × style × similarity × speed grid."""
+    grid = [
+        (v, st, sy, si, sp)
+        for v in voice_ids
+        for st in STABILITIES
+        for sy in STYLES
+        for si in SIMILARITIES
+        for sp in SPEEDS
+    ]
     np.random.default_rng(seed).shuffle(grid)
     return [grid[i % len(grid)] for i in range(n_clips)]
 
@@ -136,8 +144,12 @@ class ElevenLabsBackend(TtsBackend):
         if not voice_ids:
             raise RuntimeError("no voices available on this ElevenLabs account")
         return [
-            Variant(tag=f"{v}|{st}|{sy}|{si}", voice=v, params={"stability": st, "style": sy, "similarity": si})
-            for v, st, sy, si in _variants(n_clips, voice_ids, seed)
+            Variant(
+                tag=f"{v}|{st}|{sy}|{si}|{sp}",
+                voice=v,
+                params={"stability": st, "style": sy, "similarity": si, "speed": sp},
+            )
+            for v, st, sy, si, sp in _variants(n_clips, voice_ids, seed)
         ]
 
     def synthesize(self, phrase: str, variant: Variant) -> np.ndarray:
