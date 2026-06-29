@@ -23,6 +23,7 @@ import os
 
 import numpy as np
 
+from wwd_i.data.augment import pitch_shift
 from wwd_i.data.tts import TtsBackend, Variant, generate_clips
 
 DEFAULT_MODEL = "eleven_v3"
@@ -31,6 +32,9 @@ STABILITIES = (0.0, 0.5, 1.0)  # eleven_v3 only accepts discrete stability: Crea
 STYLES = (0.0, 0.3, 0.6)
 SIMILARITIES = (0.3, 0.6, 0.9)  # adherence to the source voice — low/mid/high gives extra timbral spread
 SPEEDS = (0.9, 1.0, 1.1)  # speaking rate; API range 0.7–1.2 (1.0 = default), moderate to avoid quality loss
+# Optional artificial pitch shift (semitones) — the API exposes no pitch knob, so this is a
+# duration-preserving post-process (see augment.pitch_shift). Off unless --pitch-shift / pitch_semitones=.
+PITCHES = (-5.0, -2.5, 2.5, 5.0)
 
 
 def _client():  # pragma: no cover - thin SDK seam
@@ -110,15 +114,23 @@ def _pcm16_to_float(pcm: bytes) -> np.ndarray:
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
 
 
-def _variants(n_clips: int, voice_ids: list[str], seed: int) -> list[tuple[str, float, float, float, float]]:
-    """Spread ``n_clips`` over a shuffled voice × stability × style × similarity × speed grid."""
+def _variants(
+    n_clips: int, voice_ids: list[str], pitches: tuple[float, ...] = (), seed: int = 0
+) -> list[tuple[str, float, float, float, float, float]]:
+    """Spread ``n_clips`` over a shuffled voice × stability × style × similarity × speed × pitch grid.
+
+    ``pitches`` is the *extra* pitch-shift axis; the unshifted (0.0) cell is always present, so an
+    empty ``pitches`` leaves the grid (and every tag) identical to the pre-pitch behavior.
+    """
+    shifts = (0.0, *pitches)
     grid = [
-        (v, st, sy, si, sp)
+        (v, st, sy, si, sp, p)
         for v in voice_ids
         for st in STABILITIES
         for sy in STYLES
         for si in SIMILARITIES
         for sp in SPEEDS
+        for p in shifts
     ]
     np.random.default_rng(seed).shuffle(grid)
     return [grid[i % len(grid)] for i in range(n_clips)]
@@ -128,9 +140,18 @@ class ElevenLabsBackend(TtsBackend):
     """``TtsBackend`` over the ElevenLabs v3 API. ``client`` / ``synthesize`` are
     injectable seams (default to the real SDK) so the offline logic stays testable."""
 
-    def __init__(self, *, model: str = DEFAULT_MODEL, max_voices: int = 40, client=None, synthesize=_synthesize):
+    def __init__(
+        self,
+        *,
+        model: str = DEFAULT_MODEL,
+        max_voices: int = 40,
+        pitch_semitones: tuple[float, ...] = (),
+        client=None,
+        synthesize=_synthesize,
+    ):
         self.model = model
         self.max_voices = max_voices
+        self.pitches = tuple(pitch_semitones)
         self._given_client = client
         self._synthesize = synthesize
 
@@ -143,18 +164,20 @@ class ElevenLabsBackend(TtsBackend):
         voice_ids = _balanced_voice_ids(self._client().voices.get_all().voices, self.max_voices, seed)
         if not voice_ids:
             raise RuntimeError("no voices available on this ElevenLabs account")
-        return [
-            Variant(
-                tag=f"{v}|{st}|{sy}|{si}|{sp}",
-                voice=v,
-                params={"stability": st, "style": sy, "similarity": si, "speed": sp},
-            )
-            for v, st, sy, si, sp in _variants(n_clips, voice_ids, seed)
-        ]
+        out = []
+        for v, st, sy, si, sp, p in _variants(n_clips, voice_ids, self.pitches, seed):
+            params = {"stability": st, "style": sy, "similarity": si, "speed": sp}
+            if p:
+                params["pitch"] = p
+            out.append(Variant(tag=f"{v}|{st}|{sy}|{si}|{sp}" + (f"|p{p:+g}" if p else ""), voice=v, params=params))
+        return out
 
     def synthesize(self, phrase: str, variant: Variant) -> np.ndarray:
-        pcm = self._synthesize(self._client(), phrase, variant.voice, model=self.model, **variant.params)
-        return _pcm16_to_float(pcm)
+        params = dict(variant.params)
+        pitch = params.pop("pitch", 0.0)  # post-process, not an SDK voice setting
+        pcm = self._synthesize(self._client(), phrase, variant.voice, model=self.model, **params)
+        audio = _pcm16_to_float(pcm)
+        return pitch_shift(audio, pitch) if pitch else audio
 
     def is_unusable_voice(self, exc: Exception) -> bool:
         return _is_unusable_voice(exc)
@@ -187,13 +210,21 @@ def main() -> None:
     p.add_argument("--n-clips", type=int, default=300)
     p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--max-voices", type=int, default=40)
+    p.add_argument(
+        "--pitch-shift",
+        action="store_true",
+        help=f"add duration-preserving pitch-shift variants ({', '.join(f'{s:+g}' for s in PITCHES)} semitones) "
+        "for extra timbral spread the API can't produce — multiplies the grid/cache",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--smoke", action="store_true", help="synthesize a single clip to validate the SDK, then exit")
     args = p.parse_args()
     if not (args.phrase or args.hard_negs_for or args.rhythm_impostors_for):
         p.error("pass --phrase, --hard-negs-for, or --rhythm-impostors-for")
 
-    backend = ElevenLabsBackend(model=args.model, max_voices=args.max_voices)
+    backend = ElevenLabsBackend(
+        model=args.model, max_voices=args.max_voices, pitch_semitones=PITCHES if args.pitch_shift else ()
+    )
     common = {"n_clips": args.n_clips, "seed": args.seed}
     if args.rhythm_impostors_for:
         from wwd_i.data.confusables import generate_rhythm_impostors

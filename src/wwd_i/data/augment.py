@@ -62,6 +62,70 @@ def speed_perturb(clip: np.ndarray, factor: float) -> np.ndarray:
     return np.ascontiguousarray(out, dtype=np.float32)
 
 
+def _stft(x: np.ndarray, n_fft: int, hop: int, win: np.ndarray) -> np.ndarray:
+    """Centered (zero-padded) STFT -> complex ``[n_freq, n_frames]``."""
+    x = np.pad(x, n_fft // 2)
+    n_frames = 1 + (len(x) - n_fft) // hop
+    idx = np.arange(n_fft)[None, :] + hop * np.arange(n_frames)[:, None]
+    return np.fft.rfft(x[idx] * win, axis=1).T
+
+
+def _istft(stft: np.ndarray, hop: int, win: np.ndarray, length: int) -> np.ndarray:
+    """Invert ``_stft`` via windowed overlap-add, cropped to ``length`` samples."""
+    n_fft = 2 * (stft.shape[0] - 1)
+    frames = np.fft.irfft(stft.T, n_fft, axis=1) * win
+    out_len = n_fft + hop * (stft.shape[1] - 1)
+    y = np.zeros(out_len, dtype=np.float64)
+    wsum = np.zeros(out_len, dtype=np.float64)
+    win2 = win**2
+    for i in range(stft.shape[1]):
+        s = i * hop
+        y[s : s + n_fft] += frames[i]
+        wsum[s : s + n_fft] += win2
+    y /= np.maximum(wsum, _EPS)
+    return y[n_fft // 2 : n_fft // 2 + length]
+
+
+def _phase_vocoder(stft: np.ndarray, rate: float, hop: int) -> np.ndarray:
+    """Time-stretch a complex STFT by ``rate`` (>1 shorter, <1 longer), phase-coherent."""
+    n_freq = stft.shape[0]
+    n_fft = 2 * (n_freq - 1)
+    phi_advance = 2 * np.pi * hop * np.arange(n_freq) / n_fft
+    steps = np.arange(0, stft.shape[1], rate)
+    stft = np.pad(stft, [(0, 0), (0, 2)])  # guard the i+1 read on the last step
+    out = np.empty((n_freq, len(steps)), dtype=complex)
+    phase = np.angle(stft[:, 0])
+    for t, step in enumerate(steps):
+        i = int(step)
+        frac = step - i
+        mag = (1.0 - frac) * np.abs(stft[:, i]) + frac * np.abs(stft[:, i + 1])
+        out[:, t] = mag * np.exp(1j * phase)
+        dphi = np.angle(stft[:, i + 1]) - np.angle(stft[:, i]) - phi_advance
+        dphi -= 2 * np.pi * np.round(dphi / (2 * np.pi))  # wrap to (-pi, pi]
+        phase = phase + phi_advance + dphi
+    return out
+
+
+def pitch_shift(clip: np.ndarray, semitones: float, *, n_fft: int = 512, hop: int = 128) -> np.ndarray:
+    """Shift pitch by ``semitones`` while preserving duration (decoupled from tempo).
+
+    A phase-vocoder time-stretch by ``1 / 2**(semitones/12)`` followed by a resample by the
+    inverse restores the original length at the new pitch — unlike ``speed_perturb``, which
+    couples the two. numpy + soxr only (no librosa). ``semitones == 0`` is a no-op.
+    """
+    clip = np.ascontiguousarray(clip, dtype=np.float32)
+    if not semitones:
+        return clip
+    shift = 2.0 ** (semitones / 12.0)
+    win = np.hanning(n_fft).astype(np.float64)
+    stft = _stft(clip.astype(np.float64), n_fft, hop, win)
+    stretched = _istft(_phase_vocoder(stft, 1.0 / shift, hop), hop, win, int(round(len(clip) * shift)))
+    resampled = soxr.resample(stretched, int(round(SAMPLE_RATE * shift)), SAMPLE_RATE)
+    n = len(clip)
+    out = resampled[:n] if len(resampled) >= n else np.pad(resampled, (0, n - len(resampled)))
+    return np.ascontiguousarray(out, dtype=np.float32)
+
+
 class Augmenter:
     """Randomly perturb a 16 kHz mono waveform to simulate real capture.
 

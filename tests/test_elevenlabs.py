@@ -76,6 +76,26 @@ def test_backend_variants_and_synthesize_decode():
     assert captured[0][0] == "hey computer" and captured[0][1] == variants[0].voice
 
 
+def test_pitch_axis_off_by_default():
+    backend = ElevenLabsBackend(client=_FakeClient([f"v{i}" for i in range(5)]), synthesize=lambda *a, **k: _sine_pcm())
+    vs = backend.variants(50, seed=0)
+    assert all("|p" not in v.tag and "pitch" not in v.params for v in vs)  # tags/params unchanged -> cache-compatible
+
+
+def test_pitch_axis_on_adds_shifted_variants_and_preserves_length():
+    def fake_synth(client, text, voice_id, *, model, stability, style, similarity, speed):
+        return _sine_pcm()  # raises if synthesize forwards the (non-SDK) pitch kwarg
+
+    backend = ElevenLabsBackend(client=_FakeClient(["v0"]), synthesize=fake_synth, pitch_semitones=(5.0,))
+    vs = backend.variants(162, seed=0)  # full single-voice grid: 3*3*3*3 * (1 + 1 shift) = 162
+    pitched = [v for v in vs if "pitch" in v.params]
+    assert pitched and all(v.params["pitch"] == 5.0 and v.tag.endswith("|p+5") for v in pitched)
+    assert any("pitch" not in v.params for v in vs)  # the unshifted 0.0 cells survive alongside
+
+    out = backend.synthesize("hey computer", pitched[0])
+    assert out.dtype == np.float32 and len(out) == SAMPLE_RATE  # duration preserved through the shift
+
+
 class _ApiError(Exception):
     """Mimics elevenlabs ApiError: carries status_code + body, duck-typed by the module."""
 

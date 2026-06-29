@@ -38,7 +38,7 @@ def test_variants_deterministic_and_count():
 
 
 def test_variants_drawn_from_voice_style_grid():
-    grid = {(v, s) for v in VOICES for s in STYLES}
+    grid = {(v, s, 0.0) for v in VOICES for s in STYLES}  # pitch off -> only the 0.0 cell
     assert all(vs in grid for vs in _variants(80, seed=0))
 
 
@@ -73,6 +73,26 @@ def test_backend_writes_and_caches_through_generate_clips(tmp_path):
 
     again = generate_clips("hey computer", tmp_path, backend, n_clips=8, seed=0)
     assert again == paths and len(calls) == 8  # all cached -> no new synthesis
+
+
+def test_pitch_axis_off_by_default():
+    backend = GeminiTtsBackend(client=object(), synthesize=lambda *a, **k: _sine_pcm())
+    vs = backend.variants(80, seed=0)
+    assert all("|p" not in v.tag and "pitch" not in v.params for v in vs)  # tags/params unchanged -> cache-compatible
+
+
+def test_pitch_axis_on_adds_shifted_variants_and_preserves_length():
+    def fake_synth(client, text, voice, *, model):
+        return _sine_pcm()
+
+    backend = GeminiTtsBackend(client=object(), synthesize=fake_synth, pitch_semitones=(5.0,))
+    vs = backend.variants(420, seed=0)  # full grid: 30 voices * 7 styles * (1 + 1 shift) = 420
+    pitched = [v for v in vs if "pitch" in v.params]
+    assert pitched and all(v.params["pitch"] == 5.0 and v.tag.endswith("|p+5") for v in pitched)
+    assert any("pitch" not in v.params for v in vs)
+
+    out = backend.synthesize("hey computer", pitched[0])
+    assert out.dtype == np.float32 and abs(len(out) - SAMPLE_RATE) <= 2  # duration preserved through the shift
 
 
 def test_backend_reraises_synthesis_error(tmp_path):

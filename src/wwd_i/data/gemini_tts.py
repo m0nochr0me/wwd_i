@@ -27,10 +27,14 @@ import numpy as np
 import soxr
 
 from wwd_i.config import SAMPLE_RATE
+from wwd_i.data.augment import pitch_shift
 from wwd_i.data.tts import TtsBackend, Variant, generate_clips
 
 DEFAULT_MODEL = "gemini-2.5-flash-preview-tts"
 GEMINI_SAMPLE_RATE = 24_000  # Gemini TTS returns s16le mono PCM @ 24 kHz; we resample to SAMPLE_RATE
+# Optional artificial pitch shift (semitones) — Gemini has no pitch knob, so this is a
+# duration-preserving post-process (see augment.pitch_shift). Off unless --pitch-shift / pitch_semitones=.
+PITCHES = (-5.0, -2.5, 2.5, 5.0)
 
 # The 30 prebuilt Gemini voices — the dominant timbral diversity lever.
 VOICES: tuple[str, ...] = (
@@ -100,9 +104,14 @@ def _pcm_to_float16k(pcm: bytes) -> np.ndarray:
     return audio.astype(np.float32)
 
 
-def _variants(n_clips: int, seed: int) -> list[tuple[str, str]]:
-    """Spread ``n_clips`` over a shuffled voice × style grid (deterministic in ``seed``)."""
-    grid = [(v, s) for v in VOICES for s in STYLES]
+def _variants(n_clips: int, pitches: tuple[float, ...] = (), seed: int = 0) -> list[tuple[str, str, float]]:
+    """Spread ``n_clips`` over a shuffled voice × style × pitch grid (deterministic in ``seed``).
+
+    ``pitches`` is the *extra* pitch-shift axis; the unshifted (0.0) cell is always present, so an
+    empty ``pitches`` leaves the grid (and every tag) identical to the pre-pitch behavior.
+    """
+    shifts = (0.0, *pitches)
+    grid = [(v, s, p) for v in VOICES for s in STYLES for p in shifts]
     np.random.default_rng(seed).shuffle(grid)
     return [grid[i % len(grid)] for i in range(n_clips)]
 
@@ -111,12 +120,21 @@ class GeminiTtsBackend(TtsBackend):
     """``TtsBackend`` over the Gemini speech-generation API. ``client`` / ``synthesize``
     are injectable seams (default to the real SDK) so the offline logic stays testable.
 
-    Unique clips cap at ``len(VOICES) * len(STYLES)`` (the grid); ``generate_clips``
-    caches by (phrase, voice, style), so a larger ``n_clips`` just reuses cells.
+    Unique clips cap at ``len(VOICES) * len(STYLES)`` (times the pitch axis when
+    enabled); ``generate_clips`` caches by (phrase, voice, style, pitch), so a larger
+    ``n_clips`` just reuses cells.
     """
 
-    def __init__(self, *, model: str = DEFAULT_MODEL, client=None, synthesize=_synthesize):
+    def __init__(
+        self,
+        *,
+        model: str = DEFAULT_MODEL,
+        pitch_semitones: tuple[float, ...] = (),
+        client=None,
+        synthesize=_synthesize,
+    ):
         self.model = model
+        self.pitches = tuple(pitch_semitones)
         self._given_client = client
         self._synthesize = synthesize
 
@@ -126,12 +144,20 @@ class GeminiTtsBackend(TtsBackend):
         return self._given_client
 
     def variants(self, n_clips: int, *, seed: int) -> list[Variant]:
-        return [Variant(tag=f"{v}|{s}", voice=v, params={"style": s}) for v, s in _variants(n_clips, seed)]
+        out = []
+        for v, s, p in _variants(n_clips, self.pitches, seed):
+            params: dict[str, str | float] = {"style": s}
+            if p:
+                params["pitch"] = p
+            out.append(Variant(tag=f"{v}|{s}" + (f"|p{p:+g}" if p else ""), voice=v, params=params))
+        return out
 
     def synthesize(self, phrase: str, variant: Variant) -> np.ndarray:
         text = _prompt(phrase, variant.params["style"])
         pcm = self._synthesize(self._client(), text, variant.voice, model=self.model)
-        return _pcm_to_float16k(pcm)
+        audio = _pcm_to_float16k(pcm)
+        pitch = variant.params.get("pitch", 0.0)
+        return pitch_shift(audio, pitch) if pitch else audio
 
 
 def main() -> None:
@@ -148,13 +174,19 @@ def main() -> None:
     p.add_argument("--out", required=True, help="output dir for the cached wavs")
     p.add_argument("--n-clips", type=int, default=300)
     p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument(
+        "--pitch-shift",
+        action="store_true",
+        help=f"add duration-preserving pitch-shift variants ({', '.join(f'{s:+g}' for s in PITCHES)} semitones) "
+        "for extra timbral spread Gemini can't produce — multiplies the grid/cache",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--smoke", action="store_true", help="synthesize a single clip to validate the SDK, then exit")
     args = p.parse_args()
     if not (args.phrase or args.hard_negs_for):
         p.error("pass --phrase or --hard-negs-for")
 
-    backend = GeminiTtsBackend(model=args.model)
+    backend = GeminiTtsBackend(model=args.model, pitch_semitones=PITCHES if args.pitch_shift else ())
     common = {"n_clips": args.n_clips, "seed": args.seed}
     if args.hard_negs_for:
         from wwd_i.data.negatives import hard_negative_phrases
