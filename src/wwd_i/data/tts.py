@@ -22,6 +22,7 @@ import numpy as np
 import soundfile as sf
 
 from wwd_i.config import SAMPLE_RATE
+from wwd_i.data.quality import clip_defects
 
 
 @dataclass(frozen=True)
@@ -83,8 +84,10 @@ def generate_clips(
 
     Cached by (phrase, variant.tag): existing files are reused, so reruns and a
     bumped ``n_clips`` only synthesize the new variants. A voice the backend reports
-    unusable (``is_unusable_voice``) is skipped for the rest of the batch, so the
-    returned count may be < ``n_clips``; other errors propagate.
+    unusable (``is_unusable_voice``) is skipped for the rest of the batch, and a
+    render with a structural defect (``quality.clip_defects`` — disfluent, truncated,
+    late-onset, silent) is dropped before it reaches disk, so the returned count may
+    be < ``n_clips``; other errors propagate.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -105,7 +108,12 @@ def generate_clips(
                 skipped.add(variant.voice)
                 print(f"skip voice {variant.voice}: {exc}")
                 continue
-            sf.write(path, rms_normalize(audio), SAMPLE_RATE)
+            audio = rms_normalize(audio)
+            defects = clip_defects(audio)
+            if defects:
+                print(f"skip defective clip {variant.tag}: {','.join(defects)}")
+                continue
+            sf.write(path, audio, SAMPLE_RATE)
         if path not in written:
             written.append(path)
     return written

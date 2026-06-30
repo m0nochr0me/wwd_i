@@ -251,6 +251,32 @@ if not restore("pos"):
     print("no positives — enable a TTS backend in Part A (opt-in), then re-run this cell")
 
 # %% [markdown]
+# ### A2½. Sanitize positives (drop structural defects)
+#
+# Even good TTS occasionally renders a disfluent / repeated take ("Aksana, hmmm... Axana?"), a clip
+# whose word spills past the 1.5 s training crop, or one that starts so late the crop is near-silent
+# (which teaches "silence ⇒ fire" = false-accepts). `quality.clip_defects` flags these from energy
+# alone — no ASR. `generate_clips` already rejects them at write time, so this mainly scrubs **restored**
+# clips from older runs (e.g. pre-gate batches). Deletes in place, then re-backs-up to Drive.
+
+# %%
+from wwd_i.audio.io import load_wav  # noqa: E402
+from wwd_i.data.quality import clip_defects  # noqa: E402
+
+pos_dir = Path(DATA) / "pos"
+removed = 0
+for wav_path in sorted(pos_dir.rglob("*.wav")):
+    defects = clip_defects(load_wav(wav_path))
+    if defects:
+        print(f"drop {wav_path.name}: {','.join(defects)}")
+        wav_path.unlink()
+        removed += 1
+kept = sum(1 for _ in pos_dir.rglob("*.wav"))
+print(f"sanitize positives: removed {removed}, kept {kept}")
+if removed:
+    backup("pos")
+
+# %% [markdown]
 # ### A3. Generate hard negatives (near phrases)
 #
 # The wake phrase's sub-words + generic confusables (`negatives.hard_negative_phrases`), **plus** — when `GEMINI_API_KEY` is set (step 6) — N **acoustic confusables** of the wake phrase from Gemini (`--llm-confusables N`, `data.confusables`): near-homophones / rhymes that actually sound like the wake word, the hardest false-trigger source. No key → just the generic confusables.
