@@ -113,7 +113,7 @@ def generate_confusables(
     out: list[str] = []
     for phrase in _parse(text):
         key = phrase.lower()
-        if key == low_wake or key in seen:
+        if key in low_wake or key in seen:
             continue
         seen.add(key)
         out.append(phrase)
