@@ -116,6 +116,113 @@ def _write_pool(
     return kept, skipped
 
 
+def _audio_column(schema, requested: str) -> str:
+    """Pick the audio column of a parquet ``schema``: an Audio struct ({bytes|path}) or audio bytes.
+
+    Prefers ``requested``, then a known audio-extension name, then any struct-with-bytes/path column.
+    """
+    import pyarrow as pa
+
+    def kind(name: str) -> str | None:
+        field_type = schema.field(name).type
+        if pa.types.is_struct(field_type) and any(f.name in ("bytes", "path") for f in field_type):
+            return "struct"
+        if pa.types.is_binary(field_type) or pa.types.is_large_binary(field_type):
+            return "binary"
+        return None
+
+    names = set(schema.names)
+    for key in (requested, *_AUDIO_KEY_HINTS):
+        if key in names and kind(key):
+            return key
+    for name in schema.names:  # fall back to any embedded-audio struct column
+        if kind(name) == "struct":
+            return name
+    raise RuntimeError(f"no audio column (struct with bytes/path, or audio-named binary) in {schema.names}")
+
+
+def _download_parquet_shards(dataset: str, config: str | None, split: str) -> list[str]:
+    """Download a hub dataset's parquet shard(s) for one ``split`` to the local HF cache.
+
+    Reads the hub's auto-converted parquet (``refs/convert/parquet``), laid out as
+    ``{config}/{split}/{shard}.parquet``. Returns local file paths.
+    """
+    from huggingface_hub import HfApi, hf_hub_download
+
+    revision = "refs/convert/parquet"
+    parquet = [
+        f for f in HfApi().list_repo_files(dataset, repo_type="dataset", revision=revision) if f.endswith(".parquet")
+    ]
+    if config is None:
+        configs = sorted({f.split("/")[0] for f in parquet})
+        if len(configs) != 1:
+            raise RuntimeError(f"{dataset} parquet has multiple configs {configs}; pass --config")
+        config = configs[0]
+    prefix = f"{config}/{split}/"
+    shards = sorted(f for f in parquet if f.startswith(prefix))
+    if not shards:
+        raise RuntimeError(f"no parquet shards under {prefix!r} in {dataset}@{revision}; check --config/--split")
+    return [hf_hub_download(dataset, filename=f, repo_type="dataset", revision=revision) for f in shards]
+
+
+def _write_pool_parquet(
+    paths: Iterable[str | Path],
+    out: str | Path,
+    *,
+    n_clips: int,
+    audio_key: str,
+    min_seconds: float,
+    max_stream: int,
+    seed: int,
+) -> tuple[int, int]:
+    """Low-RAM local read: iterate parquet row groups (one resident at a time). Returns (kept, skipped).
+
+    HF *streaming* materializes a whole row group per step (``parquet.py`` ``batch_size`` defaults to
+    the row-group row count), so a single-shard, huge-row-group Audio corpus — e.g. ``google/fleurs``
+    (2602 rows in one 1.7 GB shard of 3x ~650 MB row groups) — OOMs Colab regardless of ``--buffer-size``.
+    Reading the downloaded shard row-group-by-row-group with only the audio column projected bounds peak
+    RAM to ~one row group. Row-group and within-group order are seeded-shuffled for a reproducible subset.
+    Skips short/corrupt/non-finite clips, same as ``_write_pool``.
+    """
+    import gc
+
+    import pyarrow.parquet as pq
+
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    min_len = int(min_seconds * SAMPLE_RATE)
+    rng = np.random.default_rng(seed)
+    kept = skipped = consulted = 0
+    for path in paths:
+        if kept >= n_clips or (max_stream and consulted >= max_stream):
+            break
+        pf = pq.ParquetFile(path)
+        col_name = _audio_column(pf.schema_arrow, audio_key)
+        for rg in rng.permutation(pf.num_row_groups):
+            if kept >= n_clips or (max_stream and consulted >= max_stream):
+                break
+            table = pf.read_row_group(int(rg), columns=[col_name])  # ~one row group's audio column in RAM
+            column = table.column(col_name)
+            for j in rng.permutation(table.num_rows):
+                if kept >= n_clips or (max_stream and consulted >= max_stream):
+                    break
+                consulted += 1
+                value = column[int(j)].as_py()  # {bytes|path} dict (Audio struct) or raw bytes (binary col)
+                try:
+                    wav = _decode_16k_mono(value if isinstance(value, dict) else {"bytes": value})
+                except Exception:
+                    skipped += 1  # corrupt / unsupported codec
+                    continue
+                if len(wav) < min_len or not np.all(np.isfinite(wav)):
+                    skipped += 1
+                    continue
+                sf.write(out / f"{kept:05d}.wav", wav, SAMPLE_RATE)
+                kept += 1
+            del table, column
+            gc.collect()  # return the row group's buffers to the OS before reading the next
+    return kept, skipped
+
+
 def prepare_audio_pool(
     out: str | Path,
     *,
@@ -128,6 +235,7 @@ def prepare_audio_pool(
     buffer_size: int = 2000,
     min_seconds: float = 1.0,
     max_stream: int = 0,
+    download: bool = False,
 ) -> int:
     """Stream ``dataset``, shuffle (seeded), and materialize ``n_clips`` 16 kHz wavs.
 
@@ -135,12 +243,24 @@ def prepare_audio_pool(
     640k-clip corpus costs the bandwidth of the subset, not the whole thing. The shuffle
     is a windowed (``buffer_size``) shuffle over the stream, not a uniform draw over the
     full corpus — ``seed`` makes it reproducible. Returns the count written.
+
+    ``download=True`` fetches the parquet shard(s) to disk and reads them row-group-by-row-group
+    instead of streaming — the low-RAM path for single-shard, huge-row-group Audio parquet (e.g.
+    ``google/fleurs``), whose streaming OOMs because it materializes a whole ~650 MB row group per
+    step. No bandwidth penalty when the subset is most of a single shard.
     """
-    stream = _stream(dataset, config, split).shuffle(seed=seed, buffer_size=buffer_size)
-    kept, skipped = _write_pool(
-        stream, out, n_clips=n_clips, audio_key=audio_key, min_seconds=min_seconds, max_stream=max_stream
-    )
-    print(f"materialized {kept} clips under {out} (skipped {skipped}; seed {seed}, buffer {buffer_size})")
+    if download:
+        paths = _download_parquet_shards(dataset, config, split)
+        kept, skipped = _write_pool_parquet(
+            paths, out, n_clips=n_clips, audio_key=audio_key, min_seconds=min_seconds, max_stream=max_stream, seed=seed
+        )
+    else:
+        stream = _stream(dataset, config, split).shuffle(seed=seed, buffer_size=buffer_size)
+        kept, skipped = _write_pool(
+            stream, out, n_clips=n_clips, audio_key=audio_key, min_seconds=min_seconds, max_stream=max_stream
+        )
+    mode = "downloaded" if download else f"streamed, buffer {buffer_size}"
+    print(f"materialized {kept} clips under {out} (skipped {skipped}; seed {seed}, {mode})")
     if kept < n_clips:
         print(f"  note: only {kept}/{n_clips} kept — raise --buffer-size/--max-stream or lower --min-seconds")
     return kept
@@ -188,6 +308,12 @@ def main() -> None:
     p.add_argument("--buffer-size", type=int, default=2000, help="streaming shuffle-buffer size")
     p.add_argument("--min-seconds", type=float, default=1.0, help="skip clips shorter than this")
     p.add_argument("--max-stream", type=int, default=0, help="cap examples consulted (0 = until n-clips reached)")
+    p.add_argument(
+        "--download",
+        action="store_true",
+        help="fetch parquet shard(s) to disk and read row-group-by-row-group (low-RAM path for "
+        "single-shard Audio parquet like google/fleurs, whose streaming OOMs)",
+    )
     p.add_argument("--inspect", action="store_true", help="print one example's schema + decode check, then exit")
     args = p.parse_args()
 
@@ -205,6 +331,7 @@ def main() -> None:
         buffer_size=args.buffer_size,
         min_seconds=args.min_seconds,
         max_stream=args.max_stream,
+        download=args.download,
     )
 
 
