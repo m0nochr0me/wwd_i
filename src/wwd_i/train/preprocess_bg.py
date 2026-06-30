@@ -24,8 +24,10 @@ import soundfile as sf
 
 from wwd_i.audio.io import load_wav
 from wwd_i.config import SAMPLE_RATE
-from wwd_i.data.backgrounds import _quiet_stderr, find_audio
+from wwd_i.data.augment import Augmenter
+from wwd_i.data.backgrounds import _quiet_stderr, find_audio, load_background_pool
 from wwd_i.data.clips import fixed_length
+from wwd_i.data.tts import rms_normalize
 from wwd_i.train.train_head import CLIP_SECONDS, _default_backbone, _make_session, embed_clips
 
 
@@ -55,6 +57,15 @@ def preprocess(args: argparse.Namespace) -> np.ndarray:
     length = int(CLIP_SECONDS * SAMPLE_RATE)
     min_len = int(args.min_seconds * SAMPLE_RATE)
 
+    # Optional: augment a fraction of crops before embedding (RIR + speed + pitch + noise; gain off
+    # since the backbone is loudness-invariant). The crop is RMS-normalized to -20 dBFS first so its
+    # dynamics (clip, additive-noise SNR) match the AGC'd audio the gate streams. This changes the
+    # cache CONTENT (shape unchanged) — regen the shared bg_neg.npy when --aug-frac changes.
+    aug = None
+    if args.aug_frac > 0:
+        pool = load_background_pool(args.background, max_clips=args.aug_pool, seed=args.seed)
+        aug = Augmenter(pool, p_gain=0.0, seed=args.seed)
+
     noise_dir = Path(args.noise_pool_dir)
     noise_dir.mkdir(parents=True, exist_ok=True)
 
@@ -76,8 +87,10 @@ def preprocess(args: argparse.Namespace) -> np.ndarray:
             continue
         for crop in _crops(wav, args.crops_per_file, length, rng):
             if n_noise < args.noise_pool_size:
-                sf.write(noise_dir / f"{n_noise:05d}.wav", crop, SAMPLE_RATE)
+                sf.write(noise_dir / f"{n_noise:05d}.wav", crop, SAMPLE_RATE)  # noise pool stays clean
                 n_noise += 1
+            if aug is not None and rng.random() < args.aug_frac:
+                crop = fixed_length(aug(rms_normalize(crop)), length)  # speed-perturb may resize -> re-fix
             buf.append(crop)
             if len(buf) >= args.chunk:
                 parts.append(embed_clips(buf, session))
@@ -97,9 +110,10 @@ def preprocess(args: argparse.Namespace) -> np.ndarray:
     np.save(out, emb)
     if embedded < args.n_bg_neg:
         print(f"WARNING: corpus exhausted at {len(emb)} < requested {args.n_bg_neg} (add files or --crops-per-file)")
+    aug_note = f" | aug-frac {args.aug_frac}" if aug is not None else ""
     print(
         f"done | {len(emb)} negatives {emb.shape} -> {out} | {n_noise} noise wavs -> {noise_dir} "
-        f"| {skipped} files skipped"
+        f"| {skipped} files skipped{aug_note}"
     )
     return emb
 
@@ -114,6 +128,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--noise-pool-dir", default="data/noise_pool", help="small raw-wav pool for positive augmentation")
     p.add_argument("--noise-pool-size", type=int, default=500, help="number of raw crops written to the noise pool")
     p.add_argument("--min-seconds", type=float, default=1.0, help="skip source files shorter than this")
+    p.add_argument(
+        "--aug-frac",
+        type=float,
+        default=0.0,
+        help="fraction of crops to augment (RIR+speed+pitch+noise, gain off) before embedding; 0 (default) = "
+        "clean cache, byte-compatible with prior runs. Changes cache CONTENT not shape — regen the cache when changed.",
+    )
+    p.add_argument(
+        "--aug-pool",
+        type=int,
+        default=300,
+        help="background clips decoded into the additive-noise pool when --aug-frac>0 (bounded RAM)",
+    )
     p.add_argument("--backbone", default=_default_backbone(), help="frozen backbone.onnx")
     p.add_argument("--seed", type=int, default=0)
     return p

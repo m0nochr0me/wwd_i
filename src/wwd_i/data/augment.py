@@ -2,8 +2,9 @@
 
 Clean TTS positives are too easy; real audio is reverberant, noisy,
 and recorded at varied gains. This applies, per call, a random subset of: gain,
-speed-perturb (joint tempo+pitch, Kaldi-style), reverberation via a synthetic
-room impulse response, additive background at a sampled SNR, and clipping.
+speed-perturb (joint tempo+pitch, Kaldi-style), duration-preserving pitch-shift
+(formant/timbre — an axis the frozen backbone is NOT invariant to), reverberation
+via a synthetic room impulse response, additive background at a sampled SNR, and clipping.
 numpy + soxr only — no librosa (no py3.14 wheel). See docs/architecture.md §7.
 """
 
@@ -138,10 +139,12 @@ class Augmenter:
         self,
         background_pool: list[np.ndarray] | None = None,
         *,
-        p_gain: float = 0.8,
+        p_gain: float = 0.1,
         gain_db: tuple[float, float] = (-6.0, 6.0),
         p_speed: float = 0.5,
         speed: tuple[float, float] = (0.9, 1.1),
+        p_pitch: float = 0.3,
+        pitch_semitones: tuple[float, float] = (-2.0, 2.0),
         p_rir: float = 0.5,
         p_noise: float = 0.8,
         snr_db: tuple[float, float] = (0.0, 20.0),
@@ -149,8 +152,11 @@ class Augmenter:
         seed: int = 0,
     ) -> None:
         self.pool = background_pool or []
+        # p_gain low by default: the backbone z-score-normalizes every window, so a constant gain
+        # is analytically a no-op (export asserts loudness-invariance) — gain carries ~no signal.
         self.p_gain, self.gain_db = p_gain, gain_db
         self.p_speed, self.speed = p_speed, speed
+        self.p_pitch, self.pitch_semitones = p_pitch, pitch_semitones
         self.p_rir = p_rir
         self.p_noise, self.snr_db = p_noise, snr_db
         self.p_clip = p_clip
@@ -161,6 +167,8 @@ class Augmenter:
         out = np.ascontiguousarray(clip, dtype=np.float32)
         if rng.random() < self.p_speed:
             out = speed_perturb(out, rng.uniform(*self.speed))
+        if rng.random() < self.p_pitch:
+            out = pitch_shift(out, rng.uniform(*self.pitch_semitones))
         if rng.random() < self.p_gain:
             out = out * 10.0 ** (rng.uniform(*self.gain_db) / 20.0)
         if rng.random() < self.p_rir:

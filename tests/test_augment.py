@@ -64,5 +64,13 @@ def test_augmenter_deterministic_and_uses_pool():
     assert np.allclose(out_a, out_b)  # seeded -> reproducible
     assert out_a.dtype == np.float32 and np.all(np.isfinite(out_a))
 
-    noisy = Augmenter(pool, p_gain=0, p_speed=0, p_rir=0, p_clip=0, p_noise=1.0, seed=0)(clip.copy())
+    noisy = Augmenter(pool, p_gain=0, p_speed=0, p_pitch=0, p_rir=0, p_clip=0, p_noise=1.0, seed=0)(clip.copy())
     assert not np.allclose(noisy, clip)  # noise mixing changed the signal
+
+
+def test_augmenter_pitch_fires_and_keeps_length():
+    t = np.arange(SAMPLE_RATE) / SAMPLE_RATE
+    clip = (0.5 * np.sin(2 * np.pi * 220.0 * t)).astype(np.float32)
+    out = Augmenter(None, p_gain=0, p_speed=0, p_pitch=1.0, p_rir=0, p_noise=0, p_clip=0, seed=0)(clip.copy())
+    assert out.dtype == np.float32 and len(out) == len(clip) and np.all(np.isfinite(out))
+    assert not np.allclose(out, clip)  # pitch-shift moved the spectrum (axis the backbone is NOT invariant to)

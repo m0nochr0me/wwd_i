@@ -61,3 +61,18 @@ def test_preprocess_caps_at_n_bg_neg(tmp_path):
         )
     _, _, emb = _run(tmp_path, n_bg_neg=3)
     assert emb.shape[0] == 3  # truncated to the requested count
+
+
+def test_preprocess_aug_frac_keeps_shape_and_clean_noise_pool(tmp_path):
+    bg = tmp_path / "bg"
+    bg.mkdir()
+    for i in range(4):
+        sf.write(
+            bg / f"ok{i}.wav", np.random.default_rng(i).standard_normal(SAMPLE_RATE * 2).astype(np.float32), SAMPLE_RATE
+        )
+    out, noise, emb = _run(tmp_path, aug_frac=1.0, aug_pool=4)  # augment every crop
+
+    assert emb.shape == (8, 10, 96)  # contract shape unchanged by augmentation (4 files x 2 crops)
+    assert np.allclose(np.linalg.norm(emb, axis=-1), 1.0, atol=1e-4)  # backbone still L2-normalizes
+    pool_wavs = sorted(noise.glob("*.wav"))
+    assert len(pool_wavs) == 4 and all(len(sf.read(p)[0]) == int(1.5 * SAMPLE_RATE) for p in pool_wavs)

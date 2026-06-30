@@ -49,6 +49,13 @@ CLIP_SECONDS = 1.5
 # with the same k; tests/test_engine.py asserts equality.
 HEAD_TOPK = 3
 
+# Max front-pad (seconds) applied to AUGMENTED clip variants so the word onset slides
+# across the WINDOW — distinct sequences for the top-k-over-time GRU that keys on *which*
+# hops are word-active, not just re-noised copies. Bounded small on purpose: positives are
+# embedded WITHOUT runtime AGC, so an over-padded near-silent clip labelled positive would
+# teach "silence ramp => fire" (a false-accept). 0.2 s keeps the word well inside the 1.5 s clip.
+AUG_JITTER_SECONDS = 0.2
+
 
 def _default_backbone() -> str:
     from importlib.resources import files
@@ -101,12 +108,22 @@ def embed_clips(clips: list[np.ndarray], session: ort.InferenceSession, *, batch
 
 
 def _augmented(paths: list[Path], aug: Augmenter, n_aug: int, length: int) -> list[np.ndarray]:
-    """Each clip plus ``n_aug`` augmented variants, all fixed to ``length`` samples."""
+    """Each clip plus ``n_aug`` augmented variants, all fixed to ``length`` samples.
+
+    Each variant gets a small random front-pad (drawn from ``aug.rng``, the single shared
+    RNG) before the Augmenter, sliding the word onset across the window so the variants are
+    distinct *sequences*, not just re-noised copies. The clean clip is kept un-jittered as
+    the anchor. Jitter is bounded (``AUG_JITTER_SECONDS``) so positives never go near-silent.
+    """
+    max_pad = int(AUG_JITTER_SECONDS * SAMPLE_RATE)
     out: list[np.ndarray] = []
     for p in paths:
         clip = fixed_length(load_wav(p), length)
         out.append(clip)
-        out.extend(fixed_length(aug(clip), length) for _ in range(n_aug))
+        for _ in range(n_aug):
+            pad = int(aug.rng.integers(0, max_pad + 1))
+            shifted = np.concatenate([np.zeros(pad, dtype=np.float32), clip]) if pad else clip
+            out.append(fixed_length(aug(shifted), length))
     return out
 
 
