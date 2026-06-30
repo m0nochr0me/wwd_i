@@ -80,3 +80,29 @@ def test_calibrate_stream_reports_rhythm_impostor_far(tmp_path):
         eng, [neg], [pos], target_fa=0.5, target_fr=0.05, refractory=1.0, impostor_paths=[imp], target_impostor_far=0.0
     )
     assert gated["chosen"]["passed"] is False
+
+
+def test_calibrate_stream_skips_corrupt_negatives(tmp_path):
+    """A corrupt/truncated negative (interrupted download) must be skipped, not crash the
+    whole run, and must drop out of the FA/hr duration; all-corrupt is a hard error."""
+    pytest.importorskip("torch")
+    from test_engine import _toy_head
+
+    from wwd_i.runtime.engine import WakeWordEngine
+    from wwd_i.train.train_head import calibrate_stream
+
+    head = _toy_head(tmp_path / "head.onnx")
+    rng = np.random.default_rng(0)
+    good = tmp_path / "good.wav"
+    sf.write(str(good), (rng.standard_normal(SAMPLE_RATE * 10) * 0.1).astype(np.float32), SAMPLE_RATE)
+    bad = tmp_path / "bad.wav"
+    bad.write_bytes(b"RIFF\x00\x00\x00\x00not-a-real-wav")  # libsndfile fails to read this
+    pos = tmp_path / "pos.wav"
+    sf.write(str(pos), (rng.standard_normal(int(SAMPLE_RATE * 1.5)) * 0.1).astype(np.float32), SAMPLE_RATE)
+
+    eng = WakeWordEngine(head, threshold=0.0, refractory_s=0.0)
+    res = calibrate_stream(eng, [good, bad], [pos], target_fa=0.5, target_fr=0.05, refractory=1.0)
+    assert abs(res["neg_hours"] - 10 / 3600) < 1e-6  # only the good file counts toward duration
+
+    with pytest.raises(RuntimeError, match="unreadable"):
+        calibrate_stream(eng, [bad], [pos], target_fa=0.5, target_fr=0.05, refractory=1.0)

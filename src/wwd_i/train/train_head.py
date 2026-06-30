@@ -239,22 +239,40 @@ def calibrate_stream(
     if not neg_paths:
         raise RuntimeError("calibrate_stream: no negative audio files")
 
-    def _stream(paths: list[Path]) -> list[np.ndarray]:  # per file: [hops, 2] = (time_s, score)
-        streams = []
-        for p in paths:
-            engine.reset()
-            dets = engine.push(load_wav(p))
-            streams.append(np.array([[d.time_s, d.score] for d in dets], dtype=np.float64).reshape(-1, 2))
-        return streams
+    def _safe_load(p: Path) -> np.ndarray | None:
+        # Corrupt/truncated audio (e.g. an interrupted HF/AudioSet/FMA download) raises in
+        # libsndfile. One bad file must not kill calibration after a full train + export run,
+        # so skip it — mirrors the augmentation pool's skip-corrupt-clips policy.
+        try:
+            return load_wav(p)
+        except Exception as e:  # noqa: BLE001 — any decode failure on one file is non-fatal
+            print(f"calibrate_stream: skipping unreadable {p}: {e}")
+            return None
 
-    neg_seconds = sum(len(load_wav(p)) / SAMPLE_RATE for p in neg_paths)
-    neg_streams = _stream(neg_paths)
-    imp_streams = _stream(list(impostor_paths))
+    def _stream(paths: list[Path]) -> tuple[list[np.ndarray], float]:  # streams + total audio seconds
+        streams, seconds = [], 0.0
+        for p in paths:
+            wav = _safe_load(p)
+            if wav is None:
+                continue
+            seconds += len(wav) / SAMPLE_RATE
+            engine.reset()
+            dets = engine.push(wav)
+            streams.append(np.array([[d.time_s, d.score] for d in dets], dtype=np.float64).reshape(-1, 2))
+        return streams, seconds
+
+    neg_streams, neg_seconds = _stream(neg_paths)
+    if not neg_streams:
+        raise RuntimeError("calibrate_stream: all negative audio files were unreadable")
+    imp_streams, _ = _stream(list(impostor_paths))
 
     pos_best: list[float] = []
     for p in pos_paths:
+        wav = _safe_load(p)
+        if wav is None:
+            continue
         engine.reset()
-        dets = engine.push(load_wav(p))
+        dets = engine.push(wav)
         pos_best.append(max((d.score for d in dets), default=0.0))
     pos = np.array(pos_best, dtype=np.float64)
     neg_hours = neg_seconds / 3600.0
