@@ -106,3 +106,50 @@ def test_calibrate_stream_skips_corrupt_negatives(tmp_path):
 
     with pytest.raises(RuntimeError, match="unreadable"):
         calibrate_stream(eng, [bad], [pos], target_fa=0.5, target_fr=0.05, refractory=1.0)
+
+
+def test_calib_only_recalibrates_existing_head_without_training(tmp_path):
+    """--calib-only re-runs the streaming calibration on an already-exported head and rewrites
+    the JSON, doing no training — the namespace carries only calibration args (no n_aug/hidden/
+    epochs etc.), so reaching the training path at all would AttributeError."""
+    import argparse
+    import json
+
+    pytest.importorskip("torch")
+    from test_engine import _toy_head
+
+    from wwd_i.train.train_head import train
+
+    head = _toy_head(tmp_path / "w_head.onnx")  # stands in for a previously-trained head
+    rng = np.random.default_rng(0)
+    calib = tmp_path / "calib_bg"
+    calib.mkdir()
+    sf.write(str(calib / "neg.wav"), (rng.standard_normal(SAMPLE_RATE * 10) * 0.1).astype(np.float32), SAMPLE_RATE)
+    pos = tmp_path / "pos"
+    pos.mkdir()
+    sf.write(str(pos / "p.wav"), (rng.standard_normal(int(SAMPLE_RATE * 1.5)) * 0.1).astype(np.float32), SAMPLE_RATE)
+    out_json = tmp_path / "w_head.json"
+
+    base = {
+        "calib_only": True,
+        "calib_bg": [str(calib)],
+        "positives": str(pos),
+        "out": str(head),
+        "threshold_out": str(out_json),
+        "word": "w",
+        "backbone": "",
+        "rhythm_impostors": None,
+        "target_fa": 0.5,
+        "target_fr": 0.05,
+        "refractory": 1.0,
+        "target_impostor_far": None,
+    }
+    train(argparse.Namespace(**base))
+    meta = json.loads(out_json.read_text())
+    assert meta["word"] == "w"
+    assert {"threshold", "refractory_seconds", "fa_per_hr", "fr", "passed"} <= set(meta)
+
+    with pytest.raises(RuntimeError, match="needs --calib-bg"):
+        train(argparse.Namespace(**{**base, "calib_bg": None}))
+    with pytest.raises(RuntimeError, match="no head"):
+        train(argparse.Namespace(**{**base, "out": str(tmp_path / "missing_head.onnx")}))

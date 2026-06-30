@@ -333,62 +333,42 @@ def _fit(head: WakeHead, x: torch.Tensor, y: torch.Tensor, tr: np.ndarray, val: 
     print(f"restored best-val checkpoint (val loss {best_loss:.4f})")
 
 
-def train(args: argparse.Namespace) -> None:
-    if args.rhythm_impostors and not args.calib_bg:
-        raise RuntimeError("--rhythm-impostors needs --calib-bg (it is evaluated by the streaming calibration)")
-    torch.manual_seed(args.seed)
-    pool = load_background_pool(args.background, max_clips=args.max_bg, seed=args.seed) if args.background else []
-    aug = Augmenter(pool, seed=args.seed)
+def _streaming_calibration(args: argparse.Namespace) -> tuple[dict, str]:
+    """Calibrate an already-exported head (``args.out``) by streaming held-out negatives.
 
-    session = _make_session(args.backbone)
-    x_np, y_np = build_embeddings(args, aug, session)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    x = torch.from_numpy(x_np).float().to(device)
-    y = torch.from_numpy(y_np).to(device)
+    Shared by the full-train path and ``--calib-only``: builds the real engine on the same
+    backbone the head was embedded on and sweeps thresholds over the continuous negatives.
+    """
+    neg_paths = find_audio(args.calib_bg)
+    if not neg_paths:
+        raise RuntimeError(f"--calib-bg has no audio files under {args.calib_bg}")
+    pos_paths = sorted(Path(args.positives).rglob("*.wav"))
+    impostor_paths = find_audio(args.rhythm_impostors) if args.rhythm_impostors else []
+    if args.rhythm_impostors and not impostor_paths:
+        raise RuntimeError(f"--rhythm-impostors has no audio files under {args.rhythm_impostors}")
+    # threshold 0 + zero refractory => push() returns every hop; calibrate_stream
+    # re-thresholds offline with the real --refractory. backbone_path=args.backbone so
+    # calibration runs against the SAME backbone the head was embedded on — incl. an int8
+    # one (Phase-6 re-gate: --backbone backbone.int8.onnx), not the packaged default.
+    engine = WakeWordEngine(args.out, threshold=0.0, refractory_s=0.0, backbone_path=args.backbone)
+    result = calibrate_stream(
+        engine,
+        neg_paths,
+        pos_paths,
+        target_fa=args.target_fa,
+        target_fr=args.target_fr,
+        refractory=args.refractory,
+        impostor_paths=impostor_paths,
+        target_impostor_far=args.target_impostor_far,
+    )
+    calib_label = f"streaming, {result['neg_hours']:.2f} h continuous negatives ({len(neg_paths)} files)"
+    if impostor_paths:
+        calib_label += f" + {len(impostor_paths)} rhythm impostors"
+    return result, calib_label
 
-    # train / val (checkpoint selection) / test (honest calibration + gate)
-    idx = np.random.default_rng(args.seed).permutation(len(x))
-    n_hold = max(2, int(0.15 * len(x)))
-    test, val, tr = idx[:n_hold], idx[n_hold : 2 * n_hold], idx[2 * n_hold :]
 
-    head = WakeHead(HeadConfig(hidden=args.hidden, dropout=args.dropout)).to(device)
-    _fit(head, x, y, tr, val, args)
-
-    head.eval()
-    export_head_onnx(head, args.out)  # export first: streaming calibration loads this head
-
-    if args.calib_bg:
-        neg_paths = find_audio(args.calib_bg)
-        if not neg_paths:
-            raise RuntimeError(f"--calib-bg has no audio files under {args.calib_bg}")
-        pos_paths = sorted(Path(args.positives).rglob("*.wav"))
-        impostor_paths = find_audio(args.rhythm_impostors) if args.rhythm_impostors else []
-        if args.rhythm_impostors and not impostor_paths:
-            raise RuntimeError(f"--rhythm-impostors has no audio files under {args.rhythm_impostors}")
-        # threshold 0 + zero refractory => push() returns every hop; calibrate_stream
-        # re-thresholds offline with the real --refractory. backbone_path=args.backbone so
-        # calibration runs against the SAME backbone the head was embedded on — incl. an int8
-        # one (Phase-6 re-gate: --backbone backbone.int8.onnx), not the packaged default.
-        engine = WakeWordEngine(args.out, threshold=0.0, refractory_s=0.0, backbone_path=args.backbone)
-        result = calibrate_stream(
-            engine,
-            neg_paths,
-            pos_paths,
-            target_fa=args.target_fa,
-            target_fr=args.target_fr,
-            refractory=args.refractory,
-            impostor_paths=impostor_paths,
-            target_impostor_far=args.target_impostor_far,
-        )
-        calib_label = f"streaming, {result['neg_hours']:.2f} h continuous negatives ({len(neg_paths)} files)"
-        if impostor_paths:
-            calib_label += f" + {len(impostor_paths)} rhythm impostors"
-    else:
-        with torch.no_grad():
-            test_prob = head.clip_score(x[test], HEAD_TOPK).cpu().numpy()
-        result = calibrate(test_prob, y[test].cpu().numpy(), target_fa=args.target_fa, target_fr=args.target_fr)
-        calib_label = f"held-out test, {result['neg_hours']:.2f} h negatives"
-
+def _report_and_write(args: argparse.Namespace, result: dict, calib_label: str) -> None:
+    """Print the DET sweep + gate verdict and write the calibration JSON beside the head."""
     c = result["chosen"]
     print(f"\nDET ({calib_label}):")
     for r in result["det"]:
@@ -417,6 +397,51 @@ def train(args: argparse.Namespace) -> None:
     print(f"done | head {args.out} | calibration {args.threshold_out}")
 
 
+def train(args: argparse.Namespace) -> None:
+    if args.rhythm_impostors and not args.calib_bg:
+        raise RuntimeError("--rhythm-impostors needs --calib-bg (it is evaluated by the streaming calibration)")
+
+    if args.calib_only:
+        if not args.calib_bg:
+            raise RuntimeError("--calib-only needs --calib-bg (it re-calibrates by streaming held-out negatives)")
+        if not Path(args.out).exists():
+            raise RuntimeError(f"--calib-only: no head at {args.out} — train one first (or point --out at it)")
+        result, calib_label = _streaming_calibration(args)
+        _report_and_write(args, result, calib_label)
+        return
+
+    torch.manual_seed(args.seed)
+    pool = load_background_pool(args.background, max_clips=args.max_bg, seed=args.seed) if args.background else []
+    aug = Augmenter(pool, seed=args.seed)
+
+    session = _make_session(args.backbone)
+    x_np, y_np = build_embeddings(args, aug, session)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    x = torch.from_numpy(x_np).float().to(device)
+    y = torch.from_numpy(y_np).to(device)
+
+    # train / val (checkpoint selection) / test (honest calibration + gate)
+    idx = np.random.default_rng(args.seed).permutation(len(x))
+    n_hold = max(2, int(0.15 * len(x)))
+    test, val, tr = idx[:n_hold], idx[n_hold : 2 * n_hold], idx[2 * n_hold :]
+
+    head = WakeHead(HeadConfig(hidden=args.hidden, dropout=args.dropout)).to(device)
+    _fit(head, x, y, tr, val, args)
+
+    head.eval()
+    export_head_onnx(head, args.out)  # export first: streaming calibration loads this head
+
+    if args.calib_bg:
+        result, calib_label = _streaming_calibration(args)
+    else:
+        with torch.no_grad():
+            test_prob = head.clip_score(x[test], HEAD_TOPK).cpu().numpy()
+        result = calibrate(test_prob, y[test].cpu().numpy(), target_fa=args.target_fa, target_fr=args.target_fr)
+        calib_label = f"held-out test, {result['neg_hours']:.2f} h negatives"
+
+    _report_and_write(args, result, calib_label)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Train a per-word wake head on frozen embeddings (Phase 4).")
     p.add_argument("--word", default="wake", help="label for the calibration metadata")
@@ -433,6 +458,12 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         help="dirs of HELD-OUT continuous negative audio: calibrate FA/hr by streaming it through the real "
         "engine (sliding window + refractory) instead of the per-clip estimate. Hold out from training negatives.",
+    )
+    p.add_argument(
+        "--calib-only",
+        action="store_true",
+        help="skip training/export; re-calibrate the EXISTING --out head against --calib-bg and rewrite "
+        "--threshold-out. Re-run calibration without retraining (needs --calib-bg + an exported head at --out).",
     )
     p.add_argument(
         "--bg-neg-emb", help="pre-embedded background negatives .npy from preprocess_bg (bypasses --n-bg-neg)"
