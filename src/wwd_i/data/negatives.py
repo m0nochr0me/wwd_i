@@ -19,7 +19,10 @@ from wwd_i.data.clips import fixed_length
 # Generic confusables / common short utterances, independent of the wake phrase.
 GENERIC_CONFUSABLES = (
     "hey",
+    "hello",
+    "hi",
     "okay",
+    "stop",
     "hello there",
     "what time is it",
     "never mind",
@@ -28,6 +31,10 @@ GENERIC_CONFUSABLES = (
     "thank you",
     "no thanks",
     "one moment",
+    "wait a second",
+    "look at this",
+    "could you",
+    "please",
 )
 
 
