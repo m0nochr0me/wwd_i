@@ -57,10 +57,12 @@ def preprocess(args: argparse.Namespace) -> np.ndarray:
     length = int(CLIP_SECONDS * SAMPLE_RATE)
     min_len = int(args.min_seconds * SAMPLE_RATE)
 
-    # Optional: augment a fraction of crops before embedding (RIR + speed + pitch + noise; gain off
-    # since the backbone is loudness-invariant). The crop is RMS-normalized to -20 dBFS first so its
-    # dynamics (clip, additive-noise SNR) match the AGC'd audio the gate streams. This changes the
-    # cache CONTENT (shape unchanged) — regen the shared bg_neg.npy when --aug-frac changes.
+    # Optional: augment a fraction of crops before embedding (RIR + speed + pitch + noise; gain off —
+    # every crop is RMS-normalized to -20 dBFS below regardless). The backbone is strongly loudness-
+    # SENSITIVE and the engine AGC-normalizes to -20 dBFS at inference, so embedding crops at natural
+    # loudness trains the head off the served manifold (persistent media FA that more negatives can't
+    # fix). Normalizing before aug also makes the augmenter's clip/additive-noise-SNR act at -20 dBFS.
+    # This changes the cache CONTENT (shape unchanged) — regen the shared bg_neg.npy when it changes.
     aug = None
     if args.aug_frac > 0:
         pool = load_background_pool(args.background, max_clips=args.aug_pool, seed=args.seed)
@@ -87,10 +89,13 @@ def preprocess(args: argparse.Namespace) -> np.ndarray:
             continue
         for crop in _crops(wav, args.crops_per_file, length, rng):
             if n_noise < args.noise_pool_size:
-                sf.write(noise_dir / f"{n_noise:05d}.wav", crop, SAMPLE_RATE)  # noise pool stays clean
+                sf.write(noise_dir / f"{n_noise:05d}.wav", crop, SAMPLE_RATE)  # noise pool stays raw (aug noise source)
                 n_noise += 1
             if aug is not None and rng.random() < args.aug_frac:
-                crop = fixed_length(aug(rms_normalize(crop)), length)  # speed-perturb may resize -> re-fix
+                crop = fixed_length(
+                    aug(rms_normalize(crop)), length
+                )  # normalize before aug so clip/SNR act at -20 dBFS
+            crop = rms_normalize(crop)  # every embedded crop at -20 dBFS: match the engine's inference AGC (see above)
             buf.append(crop)
             if len(buf) >= args.chunk:
                 parts.append(embed_clips(buf, session))

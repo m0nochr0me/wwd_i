@@ -63,6 +63,32 @@ def test_preprocess_caps_at_n_bg_neg(tmp_path):
     assert emb.shape[0] == 3  # truncated to the requested count
 
 
+def test_preprocess_normalizes_crops_before_embed(tmp_path, monkeypatch):
+    # Every crop must reach the backbone at -20 dBFS (the engine's inference AGC target); a
+    # natural-loudness cache trains the head off the served manifold. Capture the buffers handed
+    # to embed_clips (both a quiet and a loud source) and assert their RMS hit the target.
+    import wwd_i.train.preprocess_bg as pb
+    from wwd_i.runtime.engine import AGC_TARGET_RMS
+
+    captured: list[np.ndarray] = []
+
+    def _fake_embed(buf, session, **kw):
+        captured.extend(buf)
+        return np.zeros((len(buf), 10, 96), np.float32)
+
+    monkeypatch.setattr(pb, "embed_clips", _fake_embed)
+
+    bg = tmp_path / "bg"
+    bg.mkdir()
+    for i, level in enumerate((0.005, 0.5)):  # quiet + loud sources -> both must normalize to target
+        sig = np.random.default_rng(i).standard_normal(SAMPLE_RATE * 2) * level
+        sf.write(bg / f"ok{i}.wav", sig.astype(np.float32), SAMPLE_RATE)
+    _run(tmp_path)
+
+    rms = [float(np.sqrt(np.mean(np.square(c, dtype=np.float64)))) for c in captured]
+    assert captured and all(abs(r - AGC_TARGET_RMS) < 5e-3 for r in rms), rms
+
+
 def test_preprocess_aug_frac_keeps_shape_and_clean_noise_pool(tmp_path):
     bg = tmp_path / "bg"
     bg.mkdir()

@@ -36,6 +36,7 @@ from wwd_i.data.augment import Augmenter
 from wwd_i.data.backgrounds import find_audio, load_background_pool
 from wwd_i.data.clips import fixed_length
 from wwd_i.data.negatives import sample_background_clips
+from wwd_i.data.tts import rms_normalize
 from wwd_i.features.melspec import compute_logmel
 from wwd_i.models.head import HeadConfig, WakeHead, export_head_onnx
 from wwd_i.runtime.engine import WakeWordEngine
@@ -51,9 +52,9 @@ HEAD_TOPK = 3
 
 # Max front-pad (seconds) applied to AUGMENTED clip variants so the word onset slides
 # across the WINDOW — distinct sequences for the top-k-over-time GRU that keys on *which*
-# hops are word-active, not just re-noised copies. Bounded small on purpose: positives are
-# embedded WITHOUT runtime AGC, so an over-padded near-silent clip labelled positive would
-# teach "silence ramp => fire" (a false-accept). 0.2 s keeps the word well inside the 1.5 s clip.
+# hops are word-active, not just re-noised copies. Bounded small on purpose: variants are
+# RMS-normalized to -20 dBFS (matching the inference AGC), so an over-padded clip would boost a
+# short word + its silence noise floor off-manifold. 0.2 s keeps the word well inside the 1.5 s clip.
 AUG_JITTER_SECONDS = 0.2
 
 
@@ -119,11 +120,11 @@ def _augmented(paths: list[Path], aug: Augmenter, n_aug: int, length: int) -> li
     out: list[np.ndarray] = []
     for p in paths:
         clip = fixed_length(load_wav(p), length)
-        out.append(clip)
+        out.append(rms_normalize(clip))  # -20 dBFS: match the engine's inference AGC (loudness-sensitive backbone)
         for _ in range(n_aug):
             pad = int(aug.rng.integers(0, max_pad + 1))
             shifted = np.concatenate([np.zeros(pad, dtype=np.float32), clip]) if pad else clip
-            out.append(fixed_length(aug(shifted), length))
+            out.append(rms_normalize(fixed_length(aug(shifted), length)))  # normalize AFTER aug (inference order)
     return out
 
 
@@ -165,7 +166,7 @@ def build_embeddings(
         neg_parts.append(cache)
     elif aug.pool:
         bg = sample_background_clips(aug.pool, args.n_bg_neg, length=length, seed=args.seed)
-        neg_parts.append(embed_clips([fixed_length(aug(c), length) for c in bg], session))
+        neg_parts.append(embed_clips([rms_normalize(fixed_length(aug(c), length)) for c in bg], session))
     if not neg_parts:
         raise RuntimeError("no negatives — pass --bg-neg-emb and/or --background and/or --hard-neg and/or --rhythm-neg")
 
