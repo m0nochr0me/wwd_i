@@ -358,6 +358,7 @@ class WakeWordEngine:
         self._emb_buf = np.zeros((0, self._emb_dim), dtype=np.float32)  # shared trailing HEAD_CONTEXT_HOPS embeddings
         self._hop = 0
         self._last_high_mel = 0.0
+        self.last_emb_window: np.ndarray | None = None  # this hop's trailing embedding window (hard-neg mining hook)
         for head in self.heads:
             head.reset()
 
@@ -383,6 +384,7 @@ class WakeWordEngine:
             window = self._mel_buf[:WINDOW][None]  # [1, WINDOW, n_mels]
             emb = self._backbone.run(None, {self._bb_in: window})[0]  # [1, D] — embed once, shared by all heads
             self._emb_buf = np.concatenate([self._emb_buf, emb])[-HEAD_CONTEXT_HOPS:]
+            self.last_emb_window = self._emb_buf  # fresh array each hop (not mutated in place) — safe to keep by ref
             # high-band energy over the same window — shared, word-independent (second-stage-gate evidence).
             # Peak frication moment (max over frames of the per-frame top-bin mean), not a window mean that
             # would dilute a brief sibilant burst (e.g. the /ks/ in "Oksana") across the ~760 ms window.

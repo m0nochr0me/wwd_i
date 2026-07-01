@@ -157,13 +157,14 @@ def build_embeddings(
             print(f"  + {len(rhythm)} rhythm-impostor training negatives")
             neg_parts.append(embed_clips(rhythm, session))
     if args.bg_neg_emb:
-        cache = np.load(args.bg_neg_emb)
-        if cache.shape[1:] != pos_emb.shape[1:]:
-            raise RuntimeError(
-                f"--bg-neg-emb {args.bg_neg_emb} has shape {cache.shape}, expected (*, {pos_emb.shape[1]}, "
-                f"{pos_emb.shape[2]}) — rebuild it with preprocess_bg against the current backbone"
-            )
-        neg_parts.append(cache)
+        for path in args.bg_neg_emb:  # one or more caches (preprocess_bg bg_neg + mine_neg mined_neg) concatenated
+            cache = np.load(path)
+            if cache.shape[1:] != pos_emb.shape[1:]:
+                raise RuntimeError(
+                    f"--bg-neg-emb {path} has shape {cache.shape}, expected (*, {pos_emb.shape[1]}, "
+                    f"{pos_emb.shape[2]}) — rebuild it with preprocess_bg/mine_neg against the current backbone"
+                )
+            neg_parts.append(cache)
     elif aug.pool:
         bg = sample_background_clips(aug.pool, args.n_bg_neg, length=length, seed=args.seed)
         neg_parts.append(embed_clips([rms_normalize(fixed_length(aug(c), length)) for c in bg], session))
@@ -467,7 +468,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--threshold-out. Re-run calibration without retraining (needs --calib-bg + an exported head at --out).",
     )
     p.add_argument(
-        "--bg-neg-emb", help="pre-embedded background negatives .npy from preprocess_bg (bypasses --n-bg-neg)"
+        "--bg-neg-emb",
+        nargs="+",
+        help="one or more pre-embedded negative .npy caches (preprocess_bg bg_neg and/or mine_neg mined_neg); "
+        "concatenated (bypasses --n-bg-neg)",
     )
     p.add_argument(
         "--rhythm-impostors",
